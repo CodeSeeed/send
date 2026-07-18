@@ -1,0 +1,10 @@
+server:
+  port: "8081"
+
+database:
+  path: data/send.db
+
+upload:
+  dir: uploads
+  max_size: 104857600
+  code_length: 8

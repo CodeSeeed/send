@@ -1,0 +1,19 @@
+# Server
+server/server.exe
+server/data/
+server/uploads/
+server/logs/
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
