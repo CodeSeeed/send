@@ -1,19 +1,15 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import Upload from '../views/Upload.vue'
-import Share from '../views/Share.vue'
-import AdminLogin from '../views/AdminLogin.vue'
-import AdminDashboard from '../views/AdminDashboard.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', name: 'upload', component: Upload },
-    { path: '/s/:code', name: 'share', component: Share },
-    { path: '/admin/login', name: 'admin-login', component: AdminLogin },
+    { path: '/', name: 'upload', component: () => import('../views/Upload.vue') },
+    { path: '/s/:code', name: 'share', component: () => import('../views/Share.vue') },
+    { path: '/admin/login', name: 'admin-login', component: () => import('../views/AdminLogin.vue') },
     {
       path: '/admin',
       name: 'admin',
-      component: AdminDashboard,
+      component: () => import('../views/AdminDashboard.vue'),
       beforeEnter: () => {
         if (!localStorage.getItem('admin_token')) {
           return { name: 'admin-login' }
