@@ -18,16 +18,21 @@ var (
 func Setup(
 	fileCtr *controller.FileController,
 	adminCtr *controller.AdminController,
-	usageCodeCtr *controller.UsageCodeController,
 	adminMW gin.HandlerFunc,
 ) *gin.Engine {
 	r := gin.Default()
+	if err := r.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		panic(err)
+	}
 	r.Use(middleware.SetupCORS())
 
 	api := r.Group("/api")
 	{
 		// Login has its own strict limiter
 		api.POST("/admin/login", loginLimiter.Middleware(), adminCtr.Login)
+		api.GET("/admin/status", adminCtr.AdminStatus)
+		api.POST("/admin/register", loginLimiter.Middleware(), adminCtr.Register)
+		api.GET("/settings", adminCtr.GetSettings)
 
 		// File upload
 		files := api.Group("/files")
@@ -45,9 +50,8 @@ func Setup(
 			admin.POST("/password", adminCtr.ChangePassword)
 			admin.GET("/files", adminCtr.ListFiles)
 			admin.DELETE("/files/:id", adminCtr.DeleteFile)
-			admin.POST("/usage-codes", usageCodeCtr.Create)
-			admin.GET("/usage-codes", usageCodeCtr.List)
-			admin.DELETE("/usage-codes/:id", usageCodeCtr.Delete)
+			admin.GET("/settings", adminCtr.GetSettings)
+			admin.PUT("/settings", adminCtr.UpdateSettings)
 		}
 	}
 

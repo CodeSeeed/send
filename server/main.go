@@ -11,7 +11,6 @@ import (
 	"send/server/model"
 	"send/server/router"
 	"send/server/service"
-	"send/server/utils"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -23,22 +22,22 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	db, err := gorm.Open(sqlite.Open(cfg.Database.Path), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(cfg.Database.Path), &gorm.Config{TranslateError: true})
 	if err != nil {
 		log.Fatalf("连接数据库失败: %v", err)
 	}
 
-	db.AutoMigrate(&model.File{}, &model.Admin{}, &model.UsageCode{})
-
-	seedAdmin(db)
+	db.AutoMigrate(&model.File{}, &model.Admin{}, &model.SystemSetting{})
 
 	fileSvc := service.NewFileService(db, cfg)
 	adminSvc := service.NewAdminService(db)
-	usageCodeSvc := service.NewUsageCodeService(db)
+	settingsSvc := service.NewSettingsService(db)
+	if err := settingsSvc.Initialize(cfg.Upload.MaxSize, cfg.Upload.DefaultExpireHours); err != nil {
+		log.Fatalf("初始化系统设置失败: %v", err)
+	}
 
-	fileCtr := controller.NewFileController(fileSvc, cfg, adminSvc, usageCodeSvc)
-	adminCtr := controller.NewAdminController(adminSvc)
-	usageCodeCtr := controller.NewUsageCodeController(usageCodeSvc)
+	fileCtr := controller.NewFileController(fileSvc, cfg, settingsSvc)
+	adminCtr := controller.NewAdminController(adminSvc, settingsSvc)
 
 	adminMW := middleware.AdminAuth(adminSvc)
 
@@ -51,28 +50,8 @@ func main() {
 		}
 	}()
 
-	r := router.Setup(fileCtr, adminCtr, usageCodeCtr, adminMW)
+	r := router.Setup(fileCtr, adminCtr, adminMW)
 
 	fmt.Printf("服务启动于 :%s\n", cfg.Server.Port)
 	r.Run(":" + cfg.Server.Port)
-}
-
-func seedAdmin(db *gorm.DB) {
-	var count int64
-	db.Model(&model.Admin{}).Count(&count)
-	if count > 0 {
-		return
-	}
-	hash, err := utils.HashPassword("123456")
-	if err != nil {
-		log.Fatalf("初始化管理员失败: %v", err)
-	}
-	admin := model.Admin{
-		Username: "codeseed",
-		Password: hash,
-	}
-	if err := db.Create(&admin).Error; err != nil {
-		log.Fatalf("创建管理员失败: %v", err)
-	}
-	log.Println("已创建默认管理员: codeseed / 123456")
 }

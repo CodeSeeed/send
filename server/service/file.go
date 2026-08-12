@@ -23,6 +23,7 @@ type downloadToken struct {
 
 var (
 	downloadTokens sync.Map
+	tokenMu        sync.Mutex
 	tokenTTL       = 5 * time.Minute
 )
 
@@ -37,6 +38,9 @@ func GenerateDownloadToken(code string) string {
 }
 
 func ValidateDownloadToken(token, code string) bool {
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+
 	val, ok := downloadTokens.Load(token)
 	if !ok {
 		return false
@@ -49,7 +53,6 @@ func ValidateDownloadToken(token, code string) bool {
 		downloadTokens.Delete(token)
 		return false
 	}
-	// One-time use — consume immediately
 	downloadTokens.Delete(token)
 	return true
 }
@@ -76,20 +79,21 @@ func NewFileService(db *gorm.DB, cfg *config.Config) *FileService {
 }
 
 type CreateFileParams struct {
-	FileName    string
-	FileSize    int64
-	Password    string
-	ExpireHours int
+	FileName      string
+	FileSize      int64
+	Password      string
+	ExpireHours   int
+	ExpireMinutes int
 }
 
 type FileResult struct {
-	Code        string    `json:"code"`
-	FileName    string    `json:"file_name"`
-	FileSize    int64     `json:"file_size"`
-	ManageToken string    `json:"manage_token"`
-	HasPassword bool      `json:"has_password"`
+	Code        string     `json:"code"`
+	FileName    string     `json:"file_name"`
+	FileSize    int64      `json:"file_size"`
+	ManageToken string     `json:"manage_token"`
+	HasPassword bool       `json:"has_password"`
 	ExpireAt    *time.Time `json:"expire_at,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type FileInfo struct {
@@ -104,32 +108,44 @@ type FileInfo struct {
 }
 
 func (s *FileService) Create(params *CreateFileParams) (*FileResult, error) {
-	code := utils.GenerateCode(s.cfg.Upload.CodeLength)
-	manageToken := utils.GenerateToken()
+	var f *model.File
+	for attempt := 0; attempt < 5; attempt++ {
+		code := utils.GenerateCode(s.cfg.Upload.CodeLength)
+		candidate := &model.File{
+			Code:        code,
+			FileName:    params.FileName,
+			FilePath:    filepath.Join(s.cfg.Upload.Dir, code),
+			FileSize:    params.FileSize,
+			ManageToken: utils.GenerateToken(),
+		}
 
-	f := &model.File{
-		Code:        code,
-		FileName:    params.FileName,
-		FilePath:    filepath.Join(s.cfg.Upload.Dir, code),
-		FileSize:    params.FileSize,
-		ManageToken: manageToken,
-	}
+		if params.Password != "" {
+			hash, err := utils.HashPassword(params.Password)
+			if err != nil {
+				return nil, err
+			}
+			candidate.PasswordHash = hash
+		}
 
-	if params.Password != "" {
-		hash, err := utils.HashPassword(params.Password)
-		if err != nil {
+		if params.ExpireMinutes > 0 {
+			t := time.Now().Add(time.Duration(params.ExpireMinutes) * time.Minute)
+			candidate.ExpireAt = &t
+		} else if params.ExpireHours > 0 {
+			t := time.Now().Add(time.Duration(params.ExpireHours) * time.Hour)
+			candidate.ExpireAt = &t
+		}
+
+		err := s.db.Create(candidate).Error
+		if err == nil {
+			f = candidate
+			break
+		}
+		if !errors.Is(err, gorm.ErrDuplicatedKey) {
 			return nil, err
 		}
-		f.PasswordHash = hash
 	}
-
-	if params.ExpireHours > 0 {
-		t := time.Now().Add(time.Duration(params.ExpireHours) * time.Hour)
-		f.ExpireAt = &t
-	}
-
-	if err := s.db.Create(f).Error; err != nil {
-		return nil, err
+	if f == nil {
+		return nil, errors.New("生成分享码失败，请重试")
 	}
 
 	return &FileResult{
@@ -143,6 +159,10 @@ func (s *FileService) Create(params *CreateFileParams) (*FileResult, error) {
 	}, nil
 }
 
+func (s *FileService) isExpired(f *model.File) bool {
+	return f.ExpireAt != nil && !time.Now().Before(*f.ExpireAt)
+}
+
 func (s *FileService) GetByCode(code string) (*FileInfo, error) {
 	var f model.File
 	if err := s.db.Where("code = ?", code).First(&f).Error; err != nil {
@@ -150,6 +170,9 @@ func (s *FileService) GetByCode(code string) (*FileInfo, error) {
 			return nil, errors.New("文件不存在或已过期")
 		}
 		return nil, err
+	}
+	if s.isExpired(&f) {
+		return nil, errors.New("文件不存在或已过期")
 	}
 	return &FileInfo{
 		ID:            f.ID,
@@ -168,6 +191,9 @@ func (s *FileService) VerifyPassword(code, password string) error {
 	if err := s.db.Where("code = ?", code).First(&f).Error; err != nil {
 		return errors.New("文件不存在或已过期")
 	}
+	if s.isExpired(&f) {
+		return errors.New("文件不存在或已过期")
+	}
 	if f.PasswordHash == "" {
 		return nil
 	}
@@ -182,8 +208,15 @@ func (s *FileService) GetFilePath(code string) (string, string, error) {
 	if err := s.db.Where("code = ?", code).First(&f).Error; err != nil {
 		return "", "", errors.New("文件不存在或已过期")
 	}
+	if s.isExpired(&f) {
+		return "", "", errors.New("文件不存在或已过期")
+	}
 	s.db.Model(&f).UpdateColumn("download_count", gorm.Expr("download_count + 1"))
 	return f.FilePath, f.FileName, nil
+}
+
+func (s *FileService) DeleteByID(code string) {
+	s.db.Where("code = ?", code).Delete(&model.File{})
 }
 
 func (s *FileService) ListByToken(token string) ([]FileInfo, error) {

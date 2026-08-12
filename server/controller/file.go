@@ -2,6 +2,8 @@ package controller
 
 import (
 	"io"
+	"mime"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,58 +16,72 @@ import (
 )
 
 type FileController struct {
-	svc          *service.FileService
-	cfg          *config.Config
-	adminSvc     *service.AdminService
-	usageCodeSvc *service.UsageCodeService
+	svc         *service.FileService
+	cfg         *config.Config
+	settingsSvc *service.SettingsService
 }
 
-func NewFileController(svc *service.FileService, cfg *config.Config, adminSvc *service.AdminService, usageCodeSvc *service.UsageCodeService) *FileController {
-	return &FileController{svc: svc, cfg: cfg, adminSvc: adminSvc, usageCodeSvc: usageCodeSvc}
+func NewFileController(svc *service.FileService, cfg *config.Config, settingsSvc *service.SettingsService) *FileController {
+	return &FileController{svc: svc, cfg: cfg, settingsSvc: settingsSvc}
 }
 
 func (ctr *FileController) Upload(c *gin.Context) {
+	settings, err := ctr.settingsSvc.Get()
+	if err != nil {
+		utils.Error(c, 500, "获取上传设置失败")
+		return
+	}
+	if settings.MaxFileSize <= 0 {
+		utils.Error(c, 500, "上传大小设置无效")
+		return
+	}
+
+	const multipartOverhead = 1 << 20
+	maxBodySize := settings.MaxFileSize + multipartOverhead
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodySize)
+
 	file, err := c.FormFile("file")
 	if err != nil {
-		utils.Error(c, 400, "请选择文件")
+		utils.Error(c, 400, "请选择文件或文件超过大小限制")
 		return
 	}
-
-	if file.Size > ctr.cfg.Upload.MaxSize {
-		utils.Error(c, 400, "文件过大，最大支持100MB")
+	if file.Size > settings.MaxFileSize {
+		utils.Error(c, 400, "文件超过当前大小限制")
 		return
-	}
-
-	// Check admin token or usage code
-	adminToken := c.GetHeader("X-Admin-Token")
-	_, err = ctr.adminSvc.Auth(adminToken)
-	if err != nil {
-		// Not admin, require usage code
-		usageCode := c.PostForm("usage_code")
-		if usageCode == "" {
-			utils.Error(c, 403, "请提供使用码")
-			return
-		}
-		if err := ctr.usageCodeSvc.Verify(usageCode, file.Size); err != nil {
-			utils.Error(c, 403, err.Error())
-			return
-		}
-		// Consume one use
-		ctr.usageCodeSvc.Use(usageCode)
 	}
 
 	password := c.PostForm("password")
-	expireStr := c.PostForm("expire_hours")
+	expireHoursText, hasExpireHours := c.GetPostForm("expire_hours")
+	expireMinutesText, hasExpireMinutes := c.GetPostForm("expire_minutes")
+	if hasExpireHours && hasExpireMinutes {
+		utils.Error(c, 400, "过期时间参数不能同时设置")
+		return
+	}
+
 	expireHours := 0
-	if expireStr != "" {
-		expireHours, _ = strconv.Atoi(expireStr)
+	if hasExpireHours {
+		expireHours, err = strconv.Atoi(expireHoursText)
+		if err != nil || expireHours <= 0 {
+			utils.Error(c, 400, "过期小时数必须是大于0的整数")
+			return
+		}
+	}
+
+	expireMinutes := 0
+	if hasExpireMinutes {
+		expireMinutes, err = strconv.Atoi(expireMinutesText)
+		if err != nil || expireMinutes <= 0 {
+			utils.Error(c, 400, "过期分钟数必须是大于0的整数")
+			return
+		}
 	}
 
 	params := &service.CreateFileParams{
-		FileName:    file.Filename,
-		FileSize:    file.Size,
-		Password:    password,
-		ExpireHours: expireHours,
+		FileName:      file.Filename,
+		FileSize:      file.Size,
+		Password:      password,
+		ExpireHours:   expireHours,
+		ExpireMinutes: expireMinutes,
 	}
 
 	result, err := ctr.svc.Create(params)
@@ -77,6 +93,7 @@ func (ctr *FileController) Upload(c *gin.Context) {
 	dst := filepath.Join(ctr.cfg.Upload.Dir, result.Code)
 	src, err := file.Open()
 	if err != nil {
+		ctr.svc.DeleteByID(result.Code)
 		utils.Error(c, 500, "上传失败")
 		return
 	}
@@ -84,12 +101,19 @@ func (ctr *FileController) Upload(c *gin.Context) {
 
 	out, err := os.Create(dst)
 	if err != nil {
+		ctr.svc.DeleteByID(result.Code)
 		utils.Error(c, 500, "上传失败")
 		return
 	}
-	defer out.Close()
 
-	io.Copy(out, src)
+	written, copyErr := io.Copy(out, src)
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil || written != file.Size {
+		os.Remove(dst)
+		ctr.svc.DeleteByID(result.Code)
+		utils.Error(c, 500, "上传失败")
+		return
+	}
 
 	utils.Success(c, result)
 }
@@ -145,7 +169,7 @@ func (ctr *FileController) Download(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Disposition", "attachment; filename=\""+filepath.Base(fileName)+"\"")
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(fileName)}))
 	c.Header("Content-Type", "application/octet-stream")
 	c.File(filePath)
 }

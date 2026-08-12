@@ -20,9 +20,10 @@ type DatabaseConfig struct {
 }
 
 type UploadConfig struct {
-	Dir        string `yaml:"dir"`
-	MaxSize    int64  `yaml:"max_size"`
-	CodeLength int    `yaml:"code_length"`
+	Dir                string `yaml:"dir"`
+	MaxSize            int64  `yaml:"max_size"`
+	DefaultExpireHours int    `yaml:"default_expire_hours"`
+	CodeLength         int    `yaml:"code_length"`
 }
 
 func Default() *Config {
@@ -34,9 +35,10 @@ func Default() *Config {
 			Path: "data/send.db",
 		},
 		Upload: UploadConfig{
-			Dir:        "uploads",
-			MaxSize:    100 << 20, // 100MB
-			CodeLength: 8,
+			Dir:                "uploads",
+			MaxSize:            30 << 20,
+			DefaultExpireHours: 168,
+			CodeLength:         8,
 		},
 	}
 }

@@ -6,5 +6,6 @@ database:
 
 upload:
   dir: uploads
-  max_size: 104857600
+  max_size: 31457280
+  default_expire_hours: 168
   code_length: 8

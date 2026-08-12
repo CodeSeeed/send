@@ -1,6 +1,14 @@
 import request from '../utils/request'
 import type { ApiResponse, ManageFile } from '../types'
 
+export function adminStatus(): Promise<ApiResponse<{ registered: boolean }>> {
+  return request.get('/admin/status')
+}
+
+export function adminRegister(username: string, password: string): Promise<ApiResponse<{ token: string }>> {
+  return request.post('/admin/register', { username, password })
+}
+
 export function adminLogin(username: string, password: string): Promise<ApiResponse<{ token: string }>> {
   return request.post('/admin/login', { username, password })
 }

@@ -26,21 +26,23 @@
         </div>
         <div class="option-item">
           <label class="option-label">过期时间</label>
-          <el-select v-model="expireHours" placeholder="选择过期时间" style="width: 100%">
-            <el-option label="1 小时后" :value="1" />
-            <el-option label="3 小时后" :value="3" />
-            <el-option label="1 天后" :value="24" />
-            <el-option label="3 天后" :value="72" />
-            <el-option label="7 天后" :value="168" />
-            <el-option label="永不过期" :value="0" />
+          <el-select v-model="expireOption" placeholder="选择过期时间" style="width: 100%">
+            <el-option label="1 小时后" value="hours:1" />
+            <el-option label="3 小时后" value="hours:3" />
+            <el-option label="1 天后" value="hours:24" />
+            <el-option label="3 天后" value="hours:72" />
+            <el-option label="7 天后" value="hours:168" />
+            <el-option label="31 天后" value="hours:744" />
+            <el-option v-if="defaultExpireHours && ![1, 3, 24, 72, 168, 744].includes(defaultExpireHours)"
+              :label="`默认（${defaultExpireHours} 小时后）`" :value="`hours:${defaultExpireHours}`" />
+            <el-option label="自定义" value="custom" />
+            <el-option label="永不过期" value="never" />
           </el-select>
-        </div>
-        <div v-if="!isAdmin" class="option-item" style="margin-top: 12px; width: 100%">
-          <label class="option-label">使用码</label>
-          <el-input v-model="usageCode" placeholder="非管理员上传需提供使用码" />
+          <el-input v-if="expireOption === 'custom'" v-model="customExpireText"
+            placeholder="例如 1天2小时30分钟" style="margin-top: 8px" />
         </div>
       </div>
-      <el-button type="primary" size="large" :loading="uploading" :disabled="!selectedFile || (!isAdmin && !usageCode)" class="upload-btn"
+      <el-button type="primary" size="large" :loading="uploading" :disabled="!selectedFile" class="upload-btn"
         @click="onUpload">
         {{ uploading ? `上传中 ${progress}%` : '上传' }}
       </el-button>
@@ -53,7 +55,7 @@
         <div class="info-row"><span class="info-label">文件名</span><span>{{ result.file_name }}</span></div>
         <div class="info-row"><span class="info-label">大小</span><span>{{ formatSize(result.file_size) }}</span></div>
         <div class="info-row"><span class="info-label">密码</span><span>{{ result.has_password ? '已设置' : '无' }}</span></div>
-        <div class="info-row"><span class="info-label">过期</span><span>{{ result.expire_at || '永不过期' }}</span></div>
+        <div class="info-row"><span class="info-label">过期</span><span>{{ result.expire_at ? formatDateTime(result.expire_at) : '永不过期' }}</span></div>
       </div>
       <div class="share-section">
         <div class="section-label">分享链接</div>
@@ -70,27 +72,33 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { uploadFile } from '../api/file'
+import { getSettings } from '../api/settings'
+import { formatDateTime } from '../utils/time'
 import type { UploadResult } from '../types'
 
 const inputRef = ref<HTMLInputElement>()
 const isDragover = ref(false)
 const selectedFile = ref<File>()
 const password = ref('')
-const expireHours = ref<number>(24)
-const usageCode = ref('')
+const defaultExpireHours = ref(168)
+const expireOption = ref('hours:168')
+const customExpireText = ref('')
 const uploading = ref(false)
 const progress = ref(0)
 const result = ref<UploadResult>()
+const baseUrl = ref('')
 
-const isAdmin = computed(() => !!localStorage.getItem('admin_token'))
+function getShareBaseUrl(baseUrl?: string) {
+  return baseUrl?.trim().replace(/\/+$/, '') || window.location.origin
+}
 
 const shareUrl = computed(() => {
   if (!result.value) return ''
-  return `${window.location.origin}/#/s/${result.value.code}`
+  return `${getShareBaseUrl(baseUrl.value)}/#/s/${encodeURIComponent(result.value.code)}`
 })
 
 function formatSize(bytes: number) {
@@ -110,14 +118,36 @@ function onFileSelect(e: Event) {
   if (file) selectedFile.value = file
 }
 
+function parseExpireText(value: string) {
+  const normalized = value.replace(/\s+/g, '')
+  const match = normalized.match(/^(?:(\d+)天)?(?:(\d+)小时)?(?:(\d+)分钟)?$/)
+  if (!match || !match[0] || !match[1] && !match[2] && !match[3]) return 0
+  return Number(match[1] || 0) * 1440 + Number(match[2] || 0) * 60 + Number(match[3] || 0)
+}
+
 async function onUpload() {
   if (!selectedFile.value) return
+  let expireHours: number | undefined
+  let expireMinutes: number | undefined
+  if (expireOption.value.startsWith('hours:')) {
+    expireHours = Number(expireOption.value.slice(6))
+  } else if (expireOption.value === 'custom') {
+    expireMinutes = parseExpireText(customExpireText.value)
+    if (!expireMinutes) {
+      ElMessage.warning('请输入有效时长，例如 1天2小时30分钟')
+      return
+    }
+  }
   uploading.value = true
   progress.value = 0
   try {
-    const res = await uploadFile(selectedFile.value, password.value || undefined,
-      expireHours.value || undefined, (p) => (progress.value = p),
-      isAdmin.value ? undefined : usageCode.value || undefined)
+    const res = await uploadFile(
+      selectedFile.value,
+      password.value || undefined,
+      expireHours,
+      expireMinutes,
+      (p) => (progress.value = p),
+    )
     result.value = res.data!
     if (result.value.manage_token) {
       const tokens = JSON.parse(localStorage.getItem('manage_tokens') || '[]')
@@ -141,11 +171,27 @@ function copyText(text: string) {
 function reset() {
   selectedFile.value = undefined
   password.value = ''
-  expireHours.value = 24
+  expireOption.value = `hours:${defaultExpireHours.value}`
+  customExpireText.value = ''
   result.value = undefined
   progress.value = 0
   if (inputRef.value) inputRef.value.value = ''
 }
+
+onMounted(async () => {
+  try {
+    const res = await getSettings()
+    baseUrl.value = res.data?.base_url || ''
+    const hours = res.data?.default_expire_hours
+    if (hours && hours > 0) {
+      defaultExpireHours.value = hours
+      expireOption.value = `hours:${hours}`
+    }
+  } catch {
+    defaultExpireHours.value = 168
+    expireOption.value = 'hours:168'
+  }
+})
 </script>
 
 <style scoped>

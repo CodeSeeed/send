@@ -33,11 +33,11 @@
         </div>
         <div class="info-row">
           <span class="info-label">过期时间</span>
-          <span>{{ fileInfo.expire_at || '永不过期' }}</span>
+          <span>{{ fileInfo.expire_at ? formatDateTime(fileInfo.expire_at) : '永不过期' }}</span>
         </div>
         <div class="info-row" style="border-bottom: none">
           <span class="info-label">创建时间</span>
-          <span>{{ fileInfo.created_at }}</span>
+          <span>{{ formatDateTime(fileInfo.created_at) }}</span>
         </div>
       </div>
 
@@ -64,6 +64,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getFileInfo, verifyPassword, getDownloadUrl } from '../api/file'
+import { formatDateTime } from '../utils/time'
 import type { FileInfo } from '../types'
 
 const route = useRoute()

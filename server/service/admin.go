@@ -19,6 +19,47 @@ func NewAdminService(db *gorm.DB) *AdminService {
 	return &AdminService{db: db}
 }
 
+func (s *AdminService) HasAdmin() (bool, error) {
+	var count int64
+	if err := s.db.Model(&model.Admin{}).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (s *AdminService) Register(username, password string) (string, error) {
+	username = strings.ToLower(strings.TrimSpace(username))
+	if username == "" || password == "" {
+		return "", errors.New("用户名和密码不能为空")
+	}
+
+	var token string
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&model.Admin{}).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return errors.New("管理员已注册")
+		}
+
+		hash, err := utils.HashPassword(password)
+		if err != nil {
+			return errors.New("密码加密失败")
+		}
+		token = utils.GenerateToken()
+		return tx.Create(&model.Admin{
+			Username: username,
+			Password: hash,
+			Token:    token,
+		}).Error
+	})
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
 func (s *AdminService) Login(username, password string) (string, error) {
 	var admin model.Admin
 	if err := s.db.Where("username = ?", strings.ToLower(username)).First(&admin).Error; err != nil {
@@ -29,7 +70,10 @@ func (s *AdminService) Login(username, password string) (string, error) {
 	}
 	// Generate new token
 	token := utils.GenerateToken()
-	s.db.Model(&admin).Update("token", token)
+	result := s.db.Model(&admin).Update("token", token)
+	if result.Error != nil {
+		return "", errors.New("登录失败")
+	}
 	return token, nil
 }
 
@@ -58,10 +102,13 @@ func (s *AdminService) ChangePassword(adminID uint, oldPwd, newPwd string) error
 	}
 	// Regenerate token to invalidate any previously compromised sessions
 	newToken := utils.GenerateToken()
-	s.db.Model(&admin).Updates(map[string]interface{}{
+	result := s.db.Model(&admin).Updates(map[string]interface{}{
 		"password": hash,
 		"token":    newToken,
 	})
+	if result.Error != nil {
+		return errors.New("密码修改失败")
+	}
 	return nil
 }
 
@@ -93,7 +140,12 @@ func (s *AdminService) DeleteFile(id uint) error {
 	if err := s.db.First(&f, id).Error; err != nil {
 		return errors.New("文件不存在")
 	}
-	os.Remove(f.FilePath)
-	s.db.Delete(&f)
+	err := os.Remove(f.FilePath)
+	if err != nil && !os.IsNotExist(err) {
+		return errors.New("文件删除失败")
+	}
+	if err := s.db.Delete(&f).Error; err != nil {
+		return errors.New("文件记录删除失败")
+	}
 	return nil
 }

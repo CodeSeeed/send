@@ -1,18 +1,18 @@
 import request from '../utils/request'
-import type { ApiResponse, UploadResult, FileInfo, ManageFile } from '../types'
+import type { ApiResponse, UploadResult, FileInfo } from '../types'
 
 export function uploadFile(
   file: File,
   password?: string,
   expireHours?: number,
+  expireMinutes?: number,
   onProgress?: (percent: number) => void,
-  usageCode?: string
 ): Promise<ApiResponse<UploadResult>> {
   const form = new FormData()
   form.append('file', file)
   if (password) form.append('password', password)
-  if (expireHours) form.append('expire_hours', String(expireHours))
-  if (usageCode) form.append('usage_code', usageCode)
+  if (expireHours !== undefined) form.append('expire_hours', String(expireHours))
+  if (expireMinutes !== undefined) form.append('expire_minutes', String(expireMinutes))
 
   const headers: Record<string, string> = { 'Content-Type': 'multipart/form-data' }
   const token = localStorage.getItem('admin_token')
@@ -39,12 +39,4 @@ export function verifyPassword(code: string, password: string): Promise<ApiRespo
 export function getDownloadUrl(code: string, token: string): string {
   const base = import.meta.env.VITE_APP_BASE_API || '/api'
   return `${base}/files/${code}/download?token=${encodeURIComponent(token)}`
-}
-
-export function getManageFiles(token: string): Promise<ApiResponse<{ files: ManageFile[] }>> {
-  return request.get('/manage/files', { headers: { 'X-Manage-Token': token } })
-}
-
-export function deleteManageFile(id: number, token: string): Promise<ApiResponse<void>> {
-  return request.delete(`/manage/files/${id}`, { headers: { 'X-Manage-Token': token } })
 }

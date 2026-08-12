@@ -10,7 +10,17 @@ const router = createRouter({
     { path: '/', name: 'upload', component: Upload },
     { path: '/s/:code', name: 'share', component: Share },
     { path: '/admin/login', name: 'admin-login', component: AdminLogin },
-    { path: '/admin', name: 'admin', component: AdminDashboard },
+    {
+      path: '/admin',
+      name: 'admin',
+      component: AdminDashboard,
+      beforeEnter: () => {
+        if (!localStorage.getItem('admin_token')) {
+          return { name: 'admin-login' }
+        }
+        return true
+      },
+    },
   ],
 })
 
