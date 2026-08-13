@@ -14,12 +14,8 @@ export function uploadFile(
   if (expireHours !== undefined) form.append('expire_hours', String(expireHours))
   if (expireMinutes !== undefined) form.append('expire_minutes', String(expireMinutes))
 
-  const headers: Record<string, string> = { 'Content-Type': 'multipart/form-data' }
-  const token = localStorage.getItem('admin_token')
-  if (token) headers['X-Admin-Token'] = token
-
   return request.post('/files', form, {
-    headers,
+    headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: (e) => {
       if (e.total && onProgress) {
         onProgress(Math.round((e.loaded / e.total) * 100))
@@ -36,7 +32,30 @@ export function verifyPassword(code: string, password: string): Promise<ApiRespo
   return request.post(`/files/${code}/verify`, { password })
 }
 
-export function getDownloadUrl(code: string, token: string): string {
+// Download via fetch + blob to support Authorization header instead of query param
+export async function downloadFile(code: string, token: string): Promise<void> {
   const base = import.meta.env.VITE_APP_BASE_API || '/api'
-  return `${base}/files/${code}/download?token=${encodeURIComponent(token)}`
+  const url = `${base}/files/${code}/download`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ message: '下载失败' }))
+    throw new Error(err.message || '下载失败')
+  }
+  const blob = await response.blob()
+  // Extract filename from Content-Disposition header
+  const disposition = response.headers.get('Content-Disposition') || ''
+  let filename = 'download'
+  const match = disposition.match(/filename="?([^";]+)"?/)
+  if (match) filename = decodeURIComponent(match[1])
+  // Trigger download
+  const blobUrl = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  window.URL.revokeObjectURL(blobUrl)
 }

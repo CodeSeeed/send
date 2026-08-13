@@ -18,26 +18,28 @@ import (
 type downloadToken struct {
 	token     string
 	code      string
+	clientIP  string
 	createdAt time.Time
 }
 
 var (
 	downloadTokens sync.Map
 	tokenMu        sync.Mutex
-	tokenTTL       = 5 * time.Minute
+	tokenTTL       = 2 * time.Minute
 )
 
-func GenerateDownloadToken(code string) string {
+func GenerateDownloadToken(code string, clientIP string) string {
 	token := utils.GenerateToken()
 	downloadTokens.Store(token, &downloadToken{
 		token:     token,
 		code:      code,
+		clientIP:  clientIP,
 		createdAt: time.Now(),
 	})
 	return token
 }
 
-func ValidateDownloadToken(token, code string) bool {
+func ValidateDownloadToken(token, code, clientIP string) bool {
 	tokenMu.Lock()
 	defer tokenMu.Unlock()
 
@@ -47,6 +49,9 @@ func ValidateDownloadToken(token, code string) bool {
 	}
 	dt := val.(*downloadToken)
 	if dt.code != code {
+		return false
+	}
+	if dt.clientIP != clientIP {
 		return false
 	}
 	if time.Since(dt.createdAt) > tokenTTL {
@@ -216,7 +221,17 @@ func (s *FileService) GetFilePath(code string) (string, string, error) {
 }
 
 func (s *FileService) DeleteByID(code string) {
-	s.db.Where("code = ?", code).Delete(&model.File{})
+	var f model.File
+	if err := s.db.Where("code = ?", code).First(&f).Error; err != nil {
+		// No record found, nothing to clean up
+		return
+	}
+	// Remove file from disk first
+	if f.FilePath != "" {
+		os.Remove(f.FilePath)
+	}
+	// Then delete the DB record
+	s.db.Delete(&f)
 }
 
 func (s *FileService) ListByToken(token string) ([]FileInfo, error) {
@@ -241,15 +256,18 @@ func (s *FileService) ListByToken(token string) ([]FileInfo, error) {
 }
 
 func (s *FileService) Delete(id uint, token string) error {
-	result := s.db.Where("id = ? AND manage_token = ?", id, token).Delete(&model.File{})
-	if result.RowsAffected == 0 {
+	// Read file record first
+	var f model.File
+	if err := s.db.Where("id = ? AND manage_token = ?", id, token).First(&f).Error; err != nil {
 		return errors.New("文件不存在或无权删除")
 	}
-	// Remove file from disk
-	var f model.File
-	s.db.Unscoped().Where("id = ?", id).First(&f)
+	// Remove file from disk first
 	if f.FilePath != "" {
 		os.Remove(f.FilePath)
+	}
+	// Then delete the DB record
+	if err := s.db.Delete(&f).Error; err != nil {
+		return err
 	}
 	return nil
 }

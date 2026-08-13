@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"net/http"
 	"strconv"
+	"time"
 
 	"send/server/service"
 	"send/server/utils"
@@ -32,6 +34,7 @@ func (ctr *AdminController) Login(c *gin.Context) {
 		utils.Error(c, 401, err.Error())
 		return
 	}
+	setAdminCookie(c, token)
 	utils.Success(c, gin.H{"token": token})
 }
 
@@ -53,12 +56,28 @@ func (ctr *AdminController) Register(c *gin.Context) {
 		utils.Error(c, 400, "参数错误")
 		return
 	}
+	if len(req.Password) > 128 {
+		utils.Error(c, 400, "密码长度不能超过128位")
+		return
+	}
 	token, err := ctr.adminSvc.Register(req.Username, req.Password)
 	if err != nil {
 		utils.Error(c, 409, err.Error())
 		return
 	}
+	setAdminCookie(c, token)
 	utils.Success(c, gin.H{"token": token})
+}
+
+func (ctr *AdminController) Check(c *gin.Context) {
+	// Auth middleware already verified the token; return success
+	adminID := c.GetUint("admin_id")
+	utils.Success(c, gin.H{"admin_id": adminID})
+}
+
+func (ctr *AdminController) Logout(c *gin.Context) {
+	clearAdminCookie(c)
+	utils.Success(c, nil)
 }
 
 func (ctr *AdminController) ChangePassword(c *gin.Context) {
@@ -76,10 +95,16 @@ func (ctr *AdminController) ChangePassword(c *gin.Context) {
 		utils.Error(c, 400, "新密码不能为空")
 		return
 	}
+	if len(req.NewPassword) > 128 {
+		utils.Error(c, 400, "密码长度不能超过128位")
+		return
+	}
 	if err := ctr.adminSvc.ChangePassword(adminID, req.OldPassword, req.NewPassword); err != nil {
 		utils.Error(c, 400, err.Error())
 		return
 	}
+	// Clear cookie so user re-logs in with new password
+	clearAdminCookie(c)
 	utils.Success(c, nil)
 }
 
@@ -133,4 +158,26 @@ func (ctr *AdminController) UpdateSettings(c *gin.Context) {
 		return
 	}
 	utils.Success(c, settings)
+}
+
+func setAdminCookie(c *gin.Context, token string) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "admin_token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(24 * time.Hour / time.Second),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func clearAdminCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "admin_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 }

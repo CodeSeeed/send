@@ -49,7 +49,7 @@ async function onSubmit() {
     const res = registered.value
       ? await adminLogin(username.value, password.value)
       : await adminRegister(username.value, password.value)
-    localStorage.setItem('admin_token', res.data!.token)
+    // The server sets the session as an HttpOnly cookie.
     ElMessage.success(registered.value ? '登录成功' : '注册成功')
     router.push('/admin')
   } catch (e: any) {

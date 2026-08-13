@@ -1,17 +1,21 @@
 package controller
 
 import (
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"unicode"
 
 	"send/server/config"
 	"send/server/service"
 	"send/server/utils"
 
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/gin-gonic/gin"
 )
 
@@ -50,7 +54,20 @@ func (ctr *FileController) Upload(c *gin.Context) {
 		return
 	}
 
+	// Validate extension against allowlist before any DB write
+	if !ctr.isAllowedExtension(file.Filename) {
+		utils.Error(c, 400, "不支持的文件类型")
+		return
+	}
+
+	fileName := sanitizeFileName(file.Filename)
+
 	password := c.PostForm("password")
+	if password != "" && len(password) < 4 {
+		utils.Error(c, 400, "访问密码长度不能少于4位")
+		return
+	}
+
 	expireHoursText, hasExpireHours := c.GetPostForm("expire_hours")
 	expireMinutesText, hasExpireMinutes := c.GetPostForm("expire_minutes")
 	if hasExpireHours && hasExpireMinutes {
@@ -76,8 +93,18 @@ func (ctr *FileController) Upload(c *gin.Context) {
 		}
 	}
 
+	// Bound expire params
+	if expireHours > ctr.cfg.Upload.MaxExpireHours {
+		utils.Error(c, 400, fmt.Sprintf("过期小时数不能超过%d", ctr.cfg.Upload.MaxExpireHours))
+		return
+	}
+	if expireMinutes > ctr.cfg.Upload.MaxExpireHours*60 {
+		utils.Error(c, 400, fmt.Sprintf("过期分钟数不能超过%d", ctr.cfg.Upload.MaxExpireHours*60))
+		return
+	}
+
 	params := &service.CreateFileParams{
-		FileName:      file.Filename,
+		FileName:      fileName,
 		FileSize:      file.Size,
 		Password:      password,
 		ExpireHours:   expireHours,
@@ -98,6 +125,22 @@ func (ctr *FileController) Upload(c *gin.Context) {
 		return
 	}
 	defer src.Close()
+
+	// Deep MIME detection: sniff header, then let mimetype inspect the start of content
+	header := make([]byte, 512)
+	n, _ := io.ReadFull(src, header)
+	if n > 0 {
+		mimeType := mimetype.Detect(header[:n]).String()
+		if !ctr.isAllowedMimeType(mimeType) {
+			src.Close()
+			os.Remove(dst)
+			ctr.svc.DeleteByID(result.Code)
+			utils.Error(c, 400, "文件类型不被允许")
+			return
+		}
+	}
+	// Reset to beginning for actual copy
+	src.Seek(0, 0)
 
 	out, err := os.Create(dst)
 	if err != nil {
@@ -144,21 +187,28 @@ func (ctr *FileController) VerifyPassword(c *gin.Context) {
 		return
 	}
 
-	// Generate one-time download token
-	token := service.GenerateDownloadToken(code)
+	// Generate one-time download token bound to the requesting client IP
+	clientIP := c.ClientIP()
+	token := service.GenerateDownloadToken(code, clientIP)
 	utils.Success(c, gin.H{"download_token": token})
 }
 
 func (ctr *FileController) Download(c *gin.Context) {
 	code := c.Param("code")
 
-	token := c.Query("token")
+	// Read token from Authorization: Bearer header (keeps it out of logs & history)
+	authHeader := c.GetHeader("Authorization")
+	token := ""
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token = strings.TrimPrefix(authHeader, "Bearer ")
+	}
 	if token == "" {
 		utils.Error(c, 403, "缺少下载凭证")
 		return
 	}
 
-	if !service.ValidateDownloadToken(token, code) {
+	clientIP := c.ClientIP()
+	if !service.ValidateDownloadToken(token, code, clientIP) {
 		utils.Error(c, 403, "下载凭证无效或已过期")
 		return
 	}
@@ -174,37 +224,80 @@ func (ctr *FileController) Download(c *gin.Context) {
 	c.File(filePath)
 }
 
-func (ctr *FileController) List(c *gin.Context) {
-	token := c.GetHeader("X-Manage-Token")
-	if token == "" {
-		utils.Error(c, 401, "未授权")
-		return
+func (ctr *FileController) isAllowedExtension(filename string) bool {
+	if len(ctr.cfg.Upload.AllowedExtensions) == 0 {
+		return true
 	}
-
-	files, err := ctr.svc.ListByToken(token)
-	if err != nil {
-		utils.Error(c, 500, "获取文件列表失败")
-		return
+	ext := strings.ToLower(filepath.Ext(filename))
+	for _, allowed := range ctr.cfg.Upload.AllowedExtensions {
+		if ext == allowed {
+			return true
+		}
 	}
-	utils.Success(c, gin.H{"files": files})
+	return false
 }
 
-func (ctr *FileController) Delete(c *gin.Context) {
-	token := c.GetHeader("X-Manage-Token")
-	if token == "" {
-		utils.Error(c, 401, "未授权")
-		return
+func (ctr *FileController) isAllowedMimeType(mimeType string) bool {
+	if len(ctr.cfg.Upload.AllowedMimeTypes) == 0 {
+		return true
 	}
+	// mimetype library returns types without parameters, but handle gracefully
+	baseType := strings.SplitN(mimeType, ";", 2)[0]
+	baseType = strings.TrimSpace(baseType)
+	for _, allowed := range ctr.cfg.Upload.AllowedMimeTypes {
+		if baseType == allowed {
+			return true
+		}
+	}
+	return false
+}
 
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		utils.Error(c, 400, "参数错误")
-		return
+func sanitizeFileName(name string) string {
+	base := filepath.Base(name)
+	var b strings.Builder
+	b.Grow(len(base))
+	for _, r := range base {
+		// Strip control characters (ASCII 0-31, 127) and Unicode control formats
+		if r < 32 || r == 127 {
+			continue
+		}
+		// Zero-width spaces / marks
+		if r == 0x200B || r == 0x200C || r == 0x200D || r == 0xFEFF {
+			continue
+		}
+		// Bidirectional text control characters (spoofing risk)
+		if r >= 0x200E && r <= 0x200F { // LRE, RLE
+			continue
+		}
+		if r >= 0x2028 && r <= 0x202E { // line/para separators + LRO, RLO, PDF, LRI, RLI, FSI
+			continue
+		}
+		if r >= 0x2066 && r <= 0x2069 { // LRI, RLI, FSI, PDI
+			continue
+		}
+		if r == 0x061C { // Arabic letter mark
+			continue
+		}
+		// General Unicode control categories
+		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		b.WriteRune(r)
 	}
-
-	if err := ctr.svc.Delete(uint(id), token); err != nil {
-		utils.Error(c, 404, err.Error())
-		return
+	sanitized := b.String()
+	// Truncate safely at a UTF-8 rune boundary (filesystem limit is 255 bytes)
+	runes := []rune(sanitized)
+	if len(sanitized) > 255 {
+		// Truncate by runes until it fits in 255 bytes
+		hi := len(runes)
+		for hi > 0 && len(string(runes[:hi])) > 255 {
+			hi--
+		}
+		sanitized = string(runes[:hi])
 	}
-	utils.Success(c, nil)
+	// Fallback if empty after sanitization
+	if sanitized == "" {
+		sanitized = "unnamed"
+	}
+	return sanitized
 }

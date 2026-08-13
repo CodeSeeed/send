@@ -14,13 +14,9 @@ export function getSettings(): Promise<ApiResponse<SystemSettings>> {
 }
 
 export function adminGetSettings(): Promise<ApiResponse<SystemSettings>> {
-  const token = localStorage.getItem('admin_token')
-  return request.get('/admin/settings', { headers: { 'X-Admin-Token': token || '' } })
+  return request.get('/admin/settings')
 }
 
 export function adminUpdateSettings(maxFileSize: number, baseUrl: string): Promise<ApiResponse<SystemSettings>> {
-  const token = localStorage.getItem('admin_token')
-  return request.put('/admin/settings', { max_file_size: maxFileSize, base_url: baseUrl }, {
-    headers: { 'X-Admin-Token': token || '' },
-  })
+  return request.put('/admin/settings', { max_file_size: maxFileSize, base_url: baseUrl })
 }

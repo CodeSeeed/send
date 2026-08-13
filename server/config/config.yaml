@@ -1,5 +1,8 @@
 server:
   port: "8081"
+  # allowed_origins:  # uncomment to restrict CORS (empty = allow all)
+  #   - https://send.example.com
+  rate_limit_localhost: false  # true = rate limit localhost too
 
 database:
   path: data/send.db
@@ -9,3 +12,39 @@ upload:
   max_size: 31457280
   default_expire_hours: 168
   code_length: 8
+  max_expire_hours: 8760
+  allowed_extensions:
+    - .zip
+    - .pdf
+    - .png
+    - .jpg
+    - .jpeg
+    - .gif
+    - .mp4
+    - .txt
+    - .doc
+    - .docx
+    - .xls
+    - .xlsx
+    - .7z
+    - .rar
+    - .csv
+    - .json
+    - .md
+  allowed_mime_types:
+    - application/zip
+    - application/pdf
+    - application/x-rar-compressed
+    - application/x-7z-compressed
+    - image/png
+    - image/jpeg
+    - image/gif
+    - video/mp4
+    - text/plain
+    - text/csv
+    - text/markdown
+    - application/msword
+    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    - application/vnd.ms-excel
+    - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    - application/json

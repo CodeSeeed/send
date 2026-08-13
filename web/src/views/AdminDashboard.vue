@@ -98,7 +98,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { adminListFiles, adminDeleteFile, adminChangePassword } from '../api/admin'
+import { adminListFiles, adminDeleteFile, adminChangePassword, adminLogout, adminCheck } from '../api/admin'
 import { adminGetSettings, adminUpdateSettings } from '../api/settings'
 import { formatDateTime } from '../utils/time'
 import type { ManageFile } from '../types'
@@ -170,7 +170,6 @@ async function loadFiles() {
     files.value = res.data?.files || []
   } catch (e: any) {
     if (e.message?.includes('未登录') || e.message?.includes('登录已过期')) {
-      localStorage.removeItem('admin_token')
       router.push('/admin/login')
       return
     }
@@ -214,7 +213,6 @@ async function onChangePwd() {
   try {
     await adminChangePassword(oldPwd.value, newPwd.value)
     ElMessage.success('密码已修改，请使用新密码重新登录')
-    localStorage.removeItem('admin_token')
     showChangePwd.value = false
     oldPwd.value = ''
     newPwd.value = ''
@@ -226,14 +224,33 @@ async function onChangePwd() {
   }
 }
 
-function onLogout() {
-  localStorage.removeItem('admin_token')
+async function onLogout() {
+  try {
+    await adminLogout()
+  } catch {
+    // Even if server call fails, still redirect to login
+  }
   router.push('/admin/login')
 }
 
-onMounted(() => {
-  loadFiles()
-  loadSettings()
+async function checkAuth() {
+  try {
+    await adminCheck()
+  } catch {
+    router.push('/admin/login')
+    return false
+  }
+  return true
+}
+
+onMounted(async () => {
+  const authed = await checkAuth()
+  if (authed) {
+    await Promise.all([
+      loadFiles(),
+      loadSettings(),
+    ])
+  }
 })
 </script>
 

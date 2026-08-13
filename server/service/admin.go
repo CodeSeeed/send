@@ -4,12 +4,16 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 
 	"send/server/model"
 	"send/server/utils"
 
 	"gorm.io/gorm"
 )
+
+// TokenTTL is the lifetime of an admin session token.
+const TokenTTL = 24 * time.Hour
 
 type AdminService struct {
 	db *gorm.DB
@@ -32,6 +36,9 @@ func (s *AdminService) Register(username, password string) (string, error) {
 	if username == "" || password == "" {
 		return "", errors.New("用户名和密码不能为空")
 	}
+	if err := validatePasswordComplexity(password); err != nil {
+		return "", err
+	}
 
 	var token string
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -48,10 +55,13 @@ func (s *AdminService) Register(username, password string) (string, error) {
 			return errors.New("密码加密失败")
 		}
 		token = utils.GenerateToken()
+		now := time.Now()
+		expiresAt := now.Add(TokenTTL)
 		return tx.Create(&model.Admin{
-			Username: username,
-			Password: hash,
-			Token:    token,
+			Username:       username,
+			Password:       hash,
+			Token:          token,
+			TokenExpiresAt: &expiresAt,
 		}).Error
 	})
 	if err != nil {
@@ -70,7 +80,12 @@ func (s *AdminService) Login(username, password string) (string, error) {
 	}
 	// Generate new token
 	token := utils.GenerateToken()
-	result := s.db.Model(&admin).Update("token", token)
+	now := time.Now()
+	expiresAt := now.Add(TokenTTL)
+	result := s.db.Model(&admin).Updates(map[string]interface{}{
+		"token":             token,
+		"token_expires_at":  expiresAt,
+	})
 	if result.Error != nil {
 		return "", errors.New("登录失败")
 	}
@@ -85,6 +100,10 @@ func (s *AdminService) Auth(token string) (uint, error) {
 	if err := s.db.Where("token = ?", token).First(&admin).Error; err != nil {
 		return 0, errors.New("登录已过期，请重新登录")
 	}
+	// Check token expiration
+	if admin.TokenExpiresAt != nil && time.Now().After(*admin.TokenExpiresAt) {
+		return 0, errors.New("登录已过期，请重新登录")
+	}
 	return admin.ID, nil
 }
 
@@ -96,15 +115,21 @@ func (s *AdminService) ChangePassword(adminID uint, oldPwd, newPwd string) error
 	if !utils.CheckPassword(oldPwd, admin.Password) {
 		return errors.New("原密码错误")
 	}
+	if err := validatePasswordComplexity(newPwd); err != nil {
+		return err
+	}
 	hash, err := utils.HashPassword(newPwd)
 	if err != nil {
 		return errors.New("密码加密失败")
 	}
 	// Regenerate token to invalidate any previously compromised sessions
 	newToken := utils.GenerateToken()
+	now := time.Now()
+	expiresAt := now.Add(TokenTTL)
 	result := s.db.Model(&admin).Updates(map[string]interface{}{
-		"password": hash,
-		"token":    newToken,
+		"password":         hash,
+		"token":            newToken,
+		"token_expires_at": expiresAt,
 	})
 	if result.Error != nil {
 		return errors.New("密码修改失败")
@@ -146,6 +171,41 @@ func (s *AdminService) DeleteFile(id uint) error {
 	}
 	if err := s.db.Delete(&f).Error; err != nil {
 		return errors.New("文件记录删除失败")
+	}
+	return nil
+}
+
+// validatePasswordComplexity enforces a minimum password strength for admin accounts.
+func validatePasswordComplexity(password string) error {
+	if len(password) < 8 {
+		return errors.New("密码长度不能少于8位")
+	}
+	if len(password) > 128 {
+		return errors.New("密码长度不能超过128位")
+	}
+	hasUpper := false
+	hasDigit := false
+	hasSpecial := false
+	for _, r := range password {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 32 && r <= 126:
+			if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') {
+				hasSpecial = true
+			}
+		}
+	}
+	if !hasUpper {
+		return errors.New("密码必须包含大写字母")
+	}
+	if !hasDigit {
+		return errors.New("密码必须包含数字")
+	}
+	if !hasSpecial {
+		return errors.New("密码必须包含特殊字符")
 	}
 	return nil
 }

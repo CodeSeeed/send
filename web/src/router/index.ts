@@ -7,15 +7,11 @@ const router = createRouter({
     { path: '/s/:code', name: 'share', component: () => import('../views/Share.vue') },
     { path: '/admin/login', name: 'admin-login', component: () => import('../views/AdminLogin.vue') },
     {
+      // Auth guard is done inside AdminDashboard via /api/admin/check
+      // (the session lives in an HttpOnly cookie, invisible to the router)
       path: '/admin',
       name: 'admin',
       component: () => import('../views/AdminDashboard.vue'),
-      beforeEnter: () => {
-        if (!localStorage.getItem('admin_token')) {
-          return { name: 'admin-login' }
-        }
-        return true
-      },
     },
   ],
 })

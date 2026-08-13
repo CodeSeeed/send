@@ -73,13 +73,16 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { uploadFile } from '../api/file'
+import { adminCheck } from '../api/admin'
 import { getSettings } from '../api/settings'
 import { formatDateTime } from '../utils/time'
 import type { UploadResult } from '../types'
 
+const router = useRouter()
 const inputRef = ref<HTMLInputElement>()
 const isDragover = ref(false)
 const selectedFile = ref<File>()
@@ -179,6 +182,14 @@ function reset() {
 }
 
 onMounted(async () => {
+  // Check auth first — only logged-in admins can upload
+  try {
+    await adminCheck()
+  } catch {
+    router.push('/admin/login')
+    return
+  }
+
   try {
     const res = await getSettings()
     baseUrl.value = res.data?.base_url || ''

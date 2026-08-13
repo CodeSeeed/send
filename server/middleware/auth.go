@@ -9,7 +9,13 @@ import (
 
 func AdminAuth(adminSvc *service.AdminService) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := c.GetHeader("X-Admin-Token")
+		// Read token from cookie first, then from header (header is fallback for dev)
+		token := ""
+		if cookieToken, err := c.Cookie("admin_token"); err == nil && cookieToken != "" {
+			token = cookieToken
+		} else {
+			token = c.GetHeader("X-Admin-Token")
+		}
 		adminID, err := adminSvc.Auth(token)
 		if err != nil {
 			utils.Error(c, 401, err.Error())

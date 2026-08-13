@@ -63,7 +63,7 @@
 import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getFileInfo, verifyPassword, getDownloadUrl } from '../api/file'
+import { getFileInfo, verifyPassword, downloadFile } from '../api/file'
 import { formatDateTime } from '../utils/time'
 import type { FileInfo } from '../types'
 
@@ -107,7 +107,8 @@ async function onDownload() {
     const payload = fileInfo.value.has_password ? { password: password.value } : { password: '' }
     const res = await verifyPassword(code, payload.password)
     const token = res.data!.download_token
-    window.open(getDownloadUrl(code, token), '_blank')
+    // Download via fetch + blob with the token in the Authorization header
+    await downloadFile(code, token)
   } catch (e: any) {
     ElMessage.error(e.message || '下载失败')
   } finally {

@@ -50,7 +50,7 @@ func main() {
 		}
 	}()
 
-	r := router.Setup(fileCtr, adminCtr, adminMW)
+	r := router.Setup(cfg, fileCtr, adminCtr, adminMW)
 
 	fmt.Printf("服务启动于 :%s\n", cfg.Server.Port)
 	r.Run(":" + cfg.Server.Port)

@@ -19,12 +19,27 @@ func CheckPassword(password, hash string) bool {
 }
 
 // GenerateCode generates a random alphanumeric code of given length
+// Uses rejection sampling to avoid modulo bias in the random byte distribution.
 func GenerateCode(length int) string {
-	b := make([]byte, length)
-	rand.Read(b)
 	chars := "abcdefghijklmnopqrstuvwxyz0123456789"
+	charsLen := len(chars)
+	// Largest multiple of charsLen that fits in a byte (0-255)
+	maxValid := 256 - (256 % charsLen)
+	b := make([]byte, length)
 	for i := 0; i < length; i++ {
-		b[i] = chars[int(b[i])%len(chars)]
+		var bb byte
+		for {
+			if _, err := rand.Read(b[i : i+1]); err != nil {
+				// crypto/rand should never fail; fall back to first char
+				bb = chars[0]
+				break
+			}
+			bb = b[i]
+			if int(bb) < maxValid {
+				break
+			}
+		}
+		b[i] = chars[int(bb)%charsLen]
 	}
 	return string(b)
 }
