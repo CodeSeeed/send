@@ -16,8 +16,12 @@ func SecurityHeaders() gin.HandlerFunc {
 			"default-src 'self'; "+
 				"script-src 'self'; "+
 				"style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data:; "+
+				// blob: is required for in-browser previews: Share.vue fetches the
+				// preview bytes with an Authorization header and renders them from
+				// an object URL (PDF in an <iframe>, images in an <img>).
+				"img-src 'self' data: blob:; "+
 				"font-src 'self' data:; "+
+				"frame-src 'self' blob:; "+
 				"form-action 'self'; "+
 				"base-uri 'none'; "+
 				"frame-ancestors 'none'")

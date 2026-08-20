@@ -8,7 +8,7 @@
       <div style="font-size: 48px; color: var(--text-placeholder); margin-bottom: 16px">—</div>
       <h2 style="font-size: 18px; font-weight: 600; margin-bottom: 8px">文件不存在</h2>
       <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 24px">该文件可能已过期或已被删除</p>
-      <el-button type="primary" @click="$router.push('/')">去上传</el-button>
+      <el-button type="primary" @click="$router.push('/')">返回首页</el-button>
     </div>
 
     <div v-else-if="fileInfo" class="file-detail">
@@ -29,7 +29,7 @@
         </div>
         <div class="info-row">
           <span class="info-label">下载次数</span>
-          <span>{{ fileInfo.download_count }}</span>
+          <span>{{ downloadCountText }}</span>
         </div>
         <div class="info-row">
           <span class="info-label">过期时间</span>
@@ -41,29 +41,53 @@
         </div>
       </div>
 
-      <div v-if="fileInfo.has_password" class="card password-card">
+      <!-- Password input (only for password-protected files before verification) -->
+      <div v-if="fileInfo.has_password && !verified" class="card password-card">
         <div class="section-label">请输入访问密码</div>
         <div class="password-row">
           <el-input v-model="password" placeholder="输入密码" show-password
-            @keyup.enter="onDownload" />
+            :disabled="downloadLimitReached" @keyup.enter="onVerify" />
           <el-button type="primary" style="margin-left: 8px; flex-shrink: 0"
-            :loading="downloading" @click="onDownload">确认</el-button>
+            :loading="verifying" :disabled="downloadLimitReached" @click="onVerify">
+            {{ downloadLimitReached ? '已达上限' : '确认' }}
+          </el-button>
         </div>
+        <p v-if="downloadLimitReached" class="limit-hint">该文件的下载次数已达上限</p>
       </div>
 
-      <el-button v-if="!fileInfo.has_password" type="primary" size="large"
-        class="download-btn" :loading="downloading" @click="onDownload">
-        下载文件
-      </el-button>
+      <p v-if="downloadLimitReached && !fileInfo.has_password" class="limit-hint">
+        该文件的下载次数已达上限
+      </p>
+
+      <!-- Actions after token is obtained -->
+      <div v-if="verified" class="action-section">
+        <!-- Preview area -->
+        <div v-if="hasPreview" class="preview-area">
+          <iframe v-if="previewType === 'pdf'" :src="previewDataUrl" class="preview-frame" />
+          <img v-else-if="previewType === 'image'" :src="previewDataUrl" class="preview-image" />
+          <pre v-else-if="previewType === 'text'" class="preview-text">{{ previewText }}</pre>
+          <div v-else class="preview-unsupported">该文件类型不支持预览</div>
+        </div>
+
+        <div class="btn-row">
+          <el-button :loading="previewLoading" :disabled="!verified" @click="onPreview">
+            {{ hasPreview ? '刷新预览' : '预览文件' }}
+          </el-button>
+          <el-button type="primary" size="large"
+            :loading="downloading" :disabled="downloadLimitReached" @click="onDownload">
+            {{ downloadLimitReached ? '下载次数已达上限' : '下载文件' }}
+          </el-button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getFileInfo, verifyPassword, downloadFile } from '../api/file'
+import { getFileInfo, verifyPassword, downloadFile, previewFile } from '../api/file'
 import { formatDateTime } from '../utils/time'
 import type { FileInfo } from '../types'
 
@@ -73,6 +97,29 @@ const notFound = ref(false)
 const fileInfo = ref<FileInfo>()
 const password = ref('')
 const downloading = ref(false)
+const verified = ref(false)
+const verifying = ref(false)
+const token = ref('')
+const tokenExpiresAt = ref(0)
+const previewLoading = ref(false)
+const previewDataUrl = ref('')
+const previewType = ref<'pdf' | 'image' | 'text' | 'unsupported'>('unsupported')
+const previewText = ref('')
+const DOWNLOAD_TOKEN_REUSE_MS = 110 * 1000
+
+const downloadLimitReached = computed(() => {
+  const f = fileInfo.value
+  return f && f.max_downloads > 0 && f.download_count >= f.max_downloads
+})
+
+const downloadCountText = computed(() => {
+  const f = fileInfo.value
+  if (!f) return ''
+  if (f.max_downloads > 0) return `${f.download_count} / ${f.max_downloads} 次`
+  return `${f.download_count} 次`
+})
+
+const hasPreview = computed(() => previewType.value === 'text' || previewDataUrl.value !== '')
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return bytes + ' B'
@@ -85,6 +132,10 @@ async function loadInfo() {
   try {
     const res = await getFileInfo(code)
     fileInfo.value = res.data
+    // Non-password files: obtain the token right away so preview/download are one click
+    if (res.data && !res.data.has_password && !downloadLimitReached.value) {
+      await onVerify()
+    }
   } catch {
     notFound.value = true
   } finally {
@@ -92,36 +143,108 @@ async function loadInfo() {
   }
 }
 
-async function onDownload() {
+async function onVerify() {
   if (!fileInfo.value) return
-  const code = fileInfo.value.code
-
   if (fileInfo.value.has_password && !password.value) {
     ElMessage.warning('请输入密码')
     return
   }
+  verifying.value = true
+  try {
+    await getDownloadToken(true)
+  } catch (e: any) {
+    ElMessage.error(e.message || '密码验证失败')
+  } finally {
+    verifying.value = false
+  }
+}
+
+async function getDownloadToken(forceRefresh = false): Promise<string> {
+  if (!fileInfo.value) throw new Error('文件信息尚未加载')
+  if (!forceRefresh && token.value && Date.now() < tokenExpiresAt.value) {
+    return token.value
+  }
+
+  const downloadPassword = fileInfo.value.has_password ? password.value : ''
+  const res = await verifyPassword(fileInfo.value.code, downloadPassword)
+  const nextToken = res.data?.download_token
+  if (!nextToken) throw new Error('获取下载凭证失败')
+
+  token.value = nextToken
+  // The server token lives for two minutes. Refresh a little early so a token
+  // does not expire between the check and the following preview/download.
+  tokenExpiresAt.value = Date.now() + DOWNLOAD_TOKEN_REUSE_MS
+  verified.value = true
+  return nextToken
+}
+
+function clearDownloadToken() {
+  token.value = ''
+  tokenExpiresAt.value = 0
+}
+
+async function onPreview() {
+  if (!fileInfo.value) return
+  previewLoading.value = true
+  try {
+    const activeToken = await getDownloadToken()
+    const { blob, mimeType } = await previewFile(fileInfo.value.code, activeToken)
+    // Map MIME type to a preview renderer
+    const base = mimeType.split(';')[0].trim()
+    revokePreviewUrl()
+    previewText.value = ''
+    if (base === 'application/pdf') {
+      previewType.value = 'pdf'
+      previewDataUrl.value = URL.createObjectURL(blob)
+    } else if (base.startsWith('image/')) {
+      previewType.value = 'image'
+      previewDataUrl.value = URL.createObjectURL(blob)
+    } else if (base.startsWith('text/') || base === 'application/json') {
+      previewType.value = 'text'
+      previewText.value = await blob.text()
+    } else {
+      previewType.value = 'unsupported'
+      ElMessage.warning('该文件类型不支持在线预览')
+    }
+  } catch (e: any) {
+    ElMessage.error(e.message || '预览失败')
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function revokePreviewUrl() {
+  if (previewDataUrl.value) {
+    URL.revokeObjectURL(previewDataUrl.value)
+  }
+}
+
+async function onDownload() {
+  if (!fileInfo.value) return
 
   downloading.value = true
   try {
-    // Verify password (or skip if no password) via POST to get one-time download token
-    const payload = fileInfo.value.has_password ? { password: password.value } : { password: '' }
-    const res = await verifyPassword(code, payload.password)
-    const token = res.data!.download_token
-    // Download via fetch + blob with the token in the Authorization header
-    await downloadFile(code, token)
+    const activeToken = await getDownloadToken()
+    await downloadFile(fileInfo.value.code, activeToken)
+    // Update local count to reflect the just-completed download
+    if (fileInfo.value) fileInfo.value.download_count++
   } catch (e: any) {
     ElMessage.error(e.message || '下载失败')
   } finally {
+    // Download tokens are one-time credentials. Clear after every attempt so
+    // the next click obtains a fresh token, including after server-side errors.
+    clearDownloadToken()
     downloading.value = false
   }
 }
 
 onMounted(loadInfo)
+onBeforeUnmount(revokePreviewUrl)
 </script>
 
 <style scoped>
 .share-page {
-  max-width: 560px;
+  max-width: 700px;
   margin: 0 auto;
 }
 .info-card {
@@ -144,10 +267,59 @@ onMounted(loadInfo)
   display: flex;
   margin-top: 8px;
 }
-.download-btn {
-  width: 100%;
+.action-section {
   margin-top: 16px;
+}
+.btn-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+.btn-row .el-button {
+  flex: 1;
   height: 44px;
   font-size: 15px;
+}
+.preview-area {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+.preview-frame {
+  width: 100%;
+  height: 600px;
+  border: none;
+  display: block;
+}
+.preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: 600px;
+  margin: 0 auto;
+  object-fit: contain;
+}
+.preview-text {
+  padding: 16px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  max-height: 500px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--preview-text-bg);
+  color: var(--text-primary);
+}
+.preview-unsupported {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.limit-hint {
+  margin-top: 8px;
+  color: var(--color-danger);
+  font-size: 13px;
+  text-align: center;
 }
 </style>

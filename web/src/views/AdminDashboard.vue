@@ -9,14 +9,30 @@
     </div>
 
     <div class="section-label" style="margin-top: 32px">文件管理</div>
+    <div class="search-bar">
+      <el-input v-model="keyword" placeholder="搜索文件名、分享码或收件码…" clearable style="width: 320px"
+        @keyup.enter="onSearch" @clear="onSearch" />
+      <el-button @click="onSearch">搜索</el-button>
+    </div>
     <div class="card" style="padding: 0; margin-top: 8px">
       <el-table :data="files" v-loading="loading" empty-text="暂无文件">
         <el-table-column prop="id" label="ID" width="60" align="center" />
         <el-table-column prop="file_name" label="文件名" min-width="160" show-overflow-tooltip />
+        <el-table-column label="收件码" width="120" align="center">
+          <template #default="{ row }">
+            <span v-if="row.receive_code" class="receive-code-cell">{{ row.receive_code }}</span>
+            <span v-else style="color: var(--text-placeholder)">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="大小" width="80">
           <template #default="{ row }">{{ formatSize(row.file_size) }}</template>
         </el-table-column>
-        <el-table-column label="下载" width="60" prop="download_count" align="center" />
+        <el-table-column label="下载" width="100" align="center">
+          <template #default="{ row }">
+            <span v-if="row.max_downloads > 0">{{ row.download_count }} / {{ row.max_downloads }}</span>
+            <span v-else>{{ row.download_count }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="密码" width="60" align="center">
           <template #default="{ row }">
             <el-tag :type="row.has_password ? 'warning' : 'info'" size="small" effect="plain">{{ row.has_password ? '是' : '否' }}</el-tag>
@@ -44,6 +60,17 @@
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="total > 0" class="pagination-wrap">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="total"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="sizes, prev, pager, next, total"
+          background
+          @current-change="loadFiles"
+          @size-change="onPageSizeChange" />
+      </div>
     </div>
 
     <div class="section-label" style="margin-top: 32px">系统设置</div>
@@ -71,6 +98,9 @@
 
     <el-dialog v-model="showShareDialog" title="文件分享链接" width="520px">
       <el-input v-model="shareLink" readonly />
+      <div v-if="shareQrDataUrl" class="qr-wrap">
+        <img :src="shareQrDataUrl" alt="二维码" width="200" height="200" />
+      </div>
       <template #footer>
         <el-button @click="showShareDialog = false">关闭</el-button>
         <el-button type="primary" @click="copyShareLink">复制链接</el-button>
@@ -101,17 +131,24 @@ import { ElMessage } from 'element-plus'
 import { adminListFiles, adminDeleteFile, adminChangePassword, adminLogout, adminCheck } from '../api/admin'
 import { adminGetSettings, adminUpdateSettings } from '../api/settings'
 import { formatDateTime } from '../utils/time'
+import { isHttpError } from '../utils/request'
 import type { ManageFile } from '../types'
+import QRCode from 'qrcode'
 
 const router = useRouter()
 const loading = ref(true)
 const files = ref<ManageFile[]>([])
+const keyword = ref('')
+const currentPage = ref(1)
+const pageSize = ref(10)
+const total = ref(0)
 const showChangePwd = ref(false)
 const oldPwd = ref('')
 const newPwd = ref('')
 const changingPwd = ref(false)
 const showShareDialog = ref(false)
 const shareLink = ref('')
+const shareQrDataUrl = ref('')
 const maxFileSizeText = ref('30MB')
 const savingSettings = ref(false)
 const baseUrl = ref('')
@@ -165,11 +202,19 @@ async function onSaveSettings() {
 }
 
 async function loadFiles() {
+  loading.value = true
   try {
-    const res = await adminListFiles()
-    files.value = res.data?.files || []
+    const res = await adminListFiles(keyword.value, currentPage.value, pageSize.value)
+    const data = res.data
+    if (data) {
+      files.value = data.files || []
+      total.value = data.total
+      currentPage.value = data.page
+      pageSize.value = data.page_size
+    }
   } catch (e: any) {
-    if (e.message?.includes('未登录') || e.message?.includes('登录已过期')) {
+    // 401 = not logged in / session expired — redirect to login
+    if (isHttpError(e, 401)) {
       router.push('/admin/login')
       return
     }
@@ -179,9 +224,26 @@ async function loadFiles() {
   }
 }
 
+function onSearch() {
+  currentPage.value = 1
+  loadFiles()
+}
+
+function onPageSizeChange(size: number) {
+  pageSize.value = size
+  currentPage.value = 1
+  loadFiles()
+}
+
 function showShareLink(code: string) {
   const base = baseUrl.value.trim().replace(/\/+$/, '') || window.location.origin
   shareLink.value = `${base}/#/s/${encodeURIComponent(code)}`
+  // Generate QR code asynchronously
+  QRCode.toDataURL(shareLink.value, { width: 400, margin: 1 }).then((url) => {
+    shareQrDataUrl.value = url
+  }).catch(() => {
+    shareQrDataUrl.value = ''
+  })
   showShareDialog.value = true
 }
 
@@ -197,7 +259,10 @@ async function copyShareLink() {
 async function onDelete(id: number) {
   try {
     await adminDeleteFile(id)
-    files.value = files.value.filter((f) => f.id !== id)
+    const remainingTotal = Math.max(0, total.value - 1)
+    const lastPage = Math.max(1, Math.ceil(remainingTotal / pageSize.value))
+    currentPage.value = Math.min(currentPage.value, lastPage)
+    await loadFiles()
     ElMessage.success('已删除')
   } catch (e: any) {
     ElMessage.error(e.message || '删除失败')
@@ -259,6 +324,37 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+.search-bar {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  align-items: center;
+}
+.pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  padding: 16px 12px;
+  border-top: 1px solid var(--border-color);
+}
+.receive-code-cell {
+  color: var(--color-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+.qr-wrap img {
+  display: block;
 }
 .setting-row {
   display: flex;

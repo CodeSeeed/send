@@ -9,19 +9,52 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// MaxPasswordBytes bounds the raw password length accepted before hashing.
+// It prevents abusing extremely long inputs for cpu/memory amplification.
+const MaxPasswordBytes = 512
+
+// prehashPassword maps the raw password onto a fixed-length 32-byte digest
+// before bcrypt. bcrypt only uses the first 72 bytes of its input, so without
+// this a password longer than 72 bytes would either fail or silently hash an
+// unrelated prefix; with it, any length up to MaxPasswordBytes is safe.
+func prehashPassword(password string) []byte {
+	sum := sha256.Sum256([]byte(password))
+	return sum[:]
+}
+
 func HashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	bytes, err := bcrypt.GenerateFromPassword(prehashPassword(password), bcrypt.DefaultCost)
 	return string(bytes), err
 }
 
 func CheckPassword(password, hash string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+	hashBytes := []byte(hash)
+	if bcrypt.CompareHashAndPassword(hashBytes, prehashPassword(password)) == nil {
+		return true
+	}
+	// Backward compatibility: releases before password pre-hashing was added
+	// stored bcrypt(rawPassword). Keep accepting those hashes so an upgrade does
+	// not lock out an existing admin or invalidate protected file passwords.
+	return bcrypt.CompareHashAndPassword(hashBytes, []byte(password)) == nil
 }
 
 // GenerateCode generates a random alphanumeric code of given length
 // Uses rejection sampling to avoid modulo bias in the random byte distribution.
 func GenerateCode(length int) string {
-	chars := "abcdefghijklmnopqrstuvwxyz0123456789"
+	return generateRandomCode(length, "abcdefghijklmnopqrstuvwxyz0123456789")
+}
+
+// GenerateReceiveCode generates an uppercase, human-friendly code. Characters
+// that are commonly confused when typed (0/O and 1/I/L) are intentionally
+// omitted.
+func GenerateReceiveCode(length int) string {
+	return generateRandomCode(length, "ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+}
+
+func generateRandomCode(length int, chars string) string {
+	if length <= 0 || len(chars) == 0 {
+		return ""
+	}
 	charsLen := len(chars)
 	// Largest multiple of charsLen that fits in a byte (0-255)
 	maxValid := 256 - (256 % charsLen)
@@ -49,56 +82,6 @@ func GenerateToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-// ExpireKey returns a unique key for expiry tracking
-func ExpireKey(code string) string {
-	h := sha256.Sum256([]byte("file_expire:" + code))
-	return hex.EncodeToString(h[:8])
-}
-
-// ParseSizeString parses a size string like "1GB200MB500kb" into bytes
-func ParseSizeString(s string) (int64, error) {
-	if s == "" {
-		return 0, nil
-	}
-	var total int64
-	var cur int64
-	for i := 0; i < len(s); i++ {
-		if s[i] >= '0' && s[i] <= '9' {
-			cur = cur*10 + int64(s[i]-'0')
-		} else if s[i] == 'G' || s[i] == 'g' {
-			if i+1 < len(s) && (s[i+1] == 'B' || s[i+1] == 'b') {
-				total += cur * 1024 * 1024 * 1024
-				cur = 0
-				i++
-			} else {
-				return 0, fmt.Errorf("无效的大小格式: %s", s)
-			}
-		} else if s[i] == 'M' || s[i] == 'm' {
-			if i+1 < len(s) && (s[i+1] == 'B' || s[i+1] == 'b') {
-				total += cur * 1024 * 1024
-				cur = 0
-				i++
-			} else {
-				return 0, fmt.Errorf("无效的大小格式: %s", s)
-			}
-		} else if s[i] == 'K' || s[i] == 'k' {
-			if i+1 < len(s) && (s[i+1] == 'B' || s[i+1] == 'b') {
-				total += cur * 1024
-				cur = 0
-				i++
-			} else {
-				return 0, fmt.Errorf("无效的大小格式: %s", s)
-			}
-		} else {
-			return 0, fmt.Errorf("无效的大小格式: %s", s)
-		}
-	}
-	if cur > 0 {
-		total += cur
-	}
-	return total, nil
 }
 
 // FormatFileSize formats bytes to human-readable string

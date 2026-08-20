@@ -21,10 +21,11 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { adminLogin, adminRegister, adminStatus } from '../api/admin'
 
+const route = useRoute()
 const router = useRouter()
 const registered = ref(true)
 const username = ref('')
@@ -46,10 +47,11 @@ async function onSubmit() {
   loading.value = true
   error.value = ''
   try {
-    const res = registered.value
-      ? await adminLogin(username.value, password.value)
-      : await adminRegister(username.value, password.value)
-    // The server sets the session as an HttpOnly cookie.
+    // The server sets the session as an HttpOnly cookie; the response body is
+    // not needed here.
+    await (registered.value
+      ? adminLogin(username.value, password.value)
+      : adminRegister(username.value, password.value))
     ElMessage.success(registered.value ? '登录成功' : '注册成功')
     router.push('/admin')
   } catch (e: any) {
@@ -59,7 +61,15 @@ async function onSubmit() {
   }
 }
 
-onMounted(loadStatus)
+onMounted(() => {
+  loadStatus()
+  // The auth guard redirects here with ?reason=auth when a protected page is
+  // accessed without a valid admin session — show a hint so the user knows
+  // why they landed on the login page.
+  if (route.query.reason === 'auth') {
+    ElMessage.warning('请先登录')
+  }
+})
 </script>
 
 <style scoped>

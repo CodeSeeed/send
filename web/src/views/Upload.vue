@@ -13,6 +13,7 @@
         </div>
         <p class="drop-text">{{ selectedFile ? selectedFile.name : '拖拽文件到此处' }}</p>
         <p class="drop-hint">{{ selectedFile ? formatSize(selectedFile.size) : '或点击选择文件' }}</p>
+        <p v-if="maxFileSize" class="size-limit">最大文件大小：{{ formatSize(maxFileSize) }}</p>
       </div>
       <input ref="inputRef" type="file" style="display: none" @change="onFileSelect" />
     </div>
@@ -42,6 +43,28 @@
             placeholder="例如 1天2小时30分钟" style="margin-top: 8px" />
         </div>
       </div>
+      <div class="options-row">
+        <div class="option-item">
+          <label class="option-label">下载次数</label>
+          <el-select v-model="downloadOption" placeholder="选择下载次数限制" style="width: 100%">
+            <el-option label="不限制" value="unlimited" />
+            <el-option label="1 次" value="1" />
+            <el-option label="3 次" value="3" />
+            <el-option label="5 次" value="5" />
+            <el-option label="10 次" value="10" />
+            <el-option label="自定义" value="custom" />
+          </el-select>
+          <el-input v-if="downloadOption === 'custom'" v-model="customDownloadsText"
+            placeholder="输入下载次数" style="margin-top: 8px" />
+        </div>
+        <div class="option-item">
+          <label class="option-label">文件收件码</label>
+          <div class="receive-code-option">
+            <el-switch v-model="generateReceiveCode" active-text="生成" inactive-text="不生成" />
+            <span>生成后可在首页输入收件码提取</span>
+          </div>
+        </div>
+      </div>
       <el-button type="primary" size="large" :loading="uploading" :disabled="!selectedFile" class="upload-btn"
         @click="onUpload">
         {{ uploading ? `上传中 ${progress}%` : '上传' }}
@@ -56,12 +79,21 @@
         <div class="info-row"><span class="info-label">大小</span><span>{{ formatSize(result.file_size) }}</span></div>
         <div class="info-row"><span class="info-label">密码</span><span>{{ result.has_password ? '已设置' : '无' }}</span></div>
         <div class="info-row"><span class="info-label">过期</span><span>{{ result.expire_at ? formatDateTime(result.expire_at) : '永不过期' }}</span></div>
+        <div class="info-row"><span class="info-label">下载次数</span><span>{{ result.max_downloads > 0 ? result.max_downloads + ' 次' : '不限制' }}</span></div>
+        <div v-if="result.receive_code" class="info-row">
+          <span class="info-label">收件码</span>
+          <strong class="receive-code-value">{{ result.receive_code }}</strong>
+          <el-button link type="primary" @click="copyText(result.receive_code)">复制</el-button>
+        </div>
       </div>
       <div class="share-section">
         <div class="section-label">分享链接</div>
         <div class="share-input-row">
           <el-input v-model="shareUrl" readonly />
           <el-button @click="copyText(shareUrl)" style="flex-shrink: 0; margin-left: 8px">复制</el-button>
+        </div>
+        <div v-if="qrDataUrl" class="qr-wrap">
+          <img :src="qrDataUrl" alt="二维码" width="160" height="160" />
         </div>
       </div>
       <div class="result-actions">
@@ -72,17 +104,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, watch, onMounted } from 'vue'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { uploadFile } from '../api/file'
-import { adminCheck } from '../api/admin'
-import { getSettings } from '../api/settings'
+import { adminGetSettings } from '../api/settings'
 import { formatDateTime } from '../utils/time'
 import type { UploadResult } from '../types'
+import QRCode from 'qrcode'
 
-const router = useRouter()
 const inputRef = ref<HTMLInputElement>()
 const isDragover = ref(false)
 const selectedFile = ref<File>()
@@ -90,10 +120,15 @@ const password = ref('')
 const defaultExpireHours = ref(168)
 const expireOption = ref('hours:168')
 const customExpireText = ref('')
+const downloadOption = ref('unlimited')
+const customDownloadsText = ref('')
+const generateReceiveCode = ref(false)
 const uploading = ref(false)
 const progress = ref(0)
 const result = ref<UploadResult>()
 const baseUrl = ref('')
+const maxFileSize = ref(0)
+const qrDataUrl = ref('')
 
 function getShareBaseUrl(baseUrl?: string) {
   return baseUrl?.trim().replace(/\/+$/, '') || window.location.origin
@@ -102,6 +137,14 @@ function getShareBaseUrl(baseUrl?: string) {
 const shareUrl = computed(() => {
   if (!result.value) return ''
   return `${getShareBaseUrl(baseUrl.value)}/#/s/${encodeURIComponent(result.value.code)}`
+})
+
+watch(shareUrl, async (url) => {
+  if (url) {
+    qrDataUrl.value = await QRCode.toDataURL(url, { width: 320, margin: 1 })
+  } else {
+    qrDataUrl.value = ''
+  }
 })
 
 function formatSize(bytes: number) {
@@ -123,9 +166,29 @@ function onFileSelect(e: Event) {
 
 function parseExpireText(value: string) {
   const normalized = value.replace(/\s+/g, '')
-  const match = normalized.match(/^(?:(\d+)天)?(?:(\d+)小时)?(?:(\d+)分钟)?$/)
-  if (!match || !match[0] || !match[1] && !match[2] && !match[3]) return 0
-  return Number(match[1] || 0) * 1440 + Number(match[2] || 0) * 60 + Number(match[3] || 0)
+  if (!normalized) return 0
+
+  // Accept units in any order, but require every input character to belong to
+  // exactly one valid segment. This rejects partial matches such as "1天abc"
+  // and ambiguous duplicates such as "1天2天".
+  const segment = /(\d+)(天|小时|分钟)/g
+  const seenUnits = new Set<string>()
+  const multipliers: Record<string, number> = { 天: 1440, 小时: 60, 分钟: 1 }
+  let cursor = 0
+  let total = 0
+  let match: RegExpExecArray | null
+
+  while ((match = segment.exec(normalized)) !== null) {
+    const unit = match[2]
+    const amount = Number(match[1])
+    if (match.index !== cursor || seenUnits.has(unit) || !Number.isSafeInteger(amount)) return 0
+    seenUnits.add(unit)
+    total += amount * multipliers[unit]
+    if (!Number.isSafeInteger(total)) return 0
+    cursor = segment.lastIndex
+  }
+
+  return cursor === normalized.length && total > 0 ? total : 0
 }
 
 async function onUpload() {
@@ -141,6 +204,17 @@ async function onUpload() {
       return
     }
   }
+  let maxDownloads: number | undefined
+  if (downloadOption.value === 'custom') {
+    const n = Number(customDownloadsText.value)
+    if (!Number.isInteger(n) || n <= 0) {
+      ElMessage.warning('请输入有效的下载次数')
+      return
+    }
+    maxDownloads = n
+  } else if (downloadOption.value !== 'unlimited') {
+    maxDownloads = Number(downloadOption.value)
+  }
   uploading.value = true
   progress.value = 0
   try {
@@ -149,16 +223,11 @@ async function onUpload() {
       password.value || undefined,
       expireHours,
       expireMinutes,
+      maxDownloads,
+      generateReceiveCode.value,
       (p) => (progress.value = p),
     )
     result.value = res.data!
-    if (result.value.manage_token) {
-      const tokens = JSON.parse(localStorage.getItem('manage_tokens') || '[]')
-      if (!tokens.includes(result.value.manage_token)) {
-        tokens.push(result.value.manage_token)
-        localStorage.setItem('manage_tokens', JSON.stringify(tokens))
-      }
-    }
     ElMessage.success('上传成功')
   } catch (e: any) {
     ElMessage.error(e.message || '上传失败')
@@ -176,23 +245,21 @@ function reset() {
   password.value = ''
   expireOption.value = `hours:${defaultExpireHours.value}`
   customExpireText.value = ''
+  downloadOption.value = 'unlimited'
+  customDownloadsText.value = ''
+  generateReceiveCode.value = false
   result.value = undefined
   progress.value = 0
   if (inputRef.value) inputRef.value.value = ''
 }
 
 onMounted(async () => {
-  // Check auth first — only logged-in admins can upload
+  // Auth is enforced by the router guard (beforeEach) — reaching this hook
+  // means the admin session is valid, so only load the settings here.
   try {
-    await adminCheck()
-  } catch {
-    router.push('/admin/login')
-    return
-  }
-
-  try {
-    const res = await getSettings()
+    const res = await adminGetSettings()
     baseUrl.value = res.data?.base_url || ''
+    maxFileSize.value = res.data?.max_file_size || 0
     const hours = res.data?.default_expire_hours
     if (hours && hours > 0) {
       defaultExpireHours.value = hours
@@ -216,7 +283,7 @@ onMounted(async () => {
 }
 .drop-zone.is-active {
   border-color: var(--color-primary);
-  background: #fafafa;
+  background: var(--bg-hover);
 }
 .drop-content {
   text-align: center;
@@ -238,6 +305,11 @@ onMounted(async () => {
   color: var(--text-secondary);
   font-size: 13px;
 }
+.size-limit {
+  color: var(--text-placeholder);
+  font-size: 12px;
+  margin-top: 8px;
+}
 .options-card {
   margin-top: 16px;
 }
@@ -254,6 +326,22 @@ onMounted(async () => {
   font-size: 13px;
   color: var(--text-secondary);
   margin-bottom: 6px;
+}
+.receive-code-option {
+  min-height: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  color: var(--text-placeholder);
+  font-size: 12px;
+}
+.receive-code-value {
+  flex: 1;
+  color: var(--color-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 16px;
+  letter-spacing: 0.12em;
 }
 .upload-btn {
   width: 100%;
@@ -281,6 +369,18 @@ onMounted(async () => {
 }
 .share-section {
   margin-top: 16px;
+}
+.qr-wrap {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+.qr-wrap img {
+  display: block;
 }
 .share-input-row {
   display: flex;

@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"send/server/config"
@@ -20,6 +22,18 @@ func main() {
 	cfg, err := config.Load("config/config.yaml")
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
+	}
+
+	// A fresh checkout does not contain the ignored runtime directories. Create
+	// them before SQLite or the upload handler tries to write into them.
+	databaseDir := filepath.Dir(cfg.Database.Path)
+	if databaseDir != "." {
+		if err := os.MkdirAll(databaseDir, 0o750); err != nil {
+			log.Fatalf("创建数据库目录失败: %v", err)
+		}
+	}
+	if err := os.MkdirAll(cfg.Upload.Dir, 0o750); err != nil {
+		log.Fatalf("创建上传目录失败: %v", err)
 	}
 
 	db, err := gorm.Open(sqlite.Open(cfg.Database.Path), &gorm.Config{TranslateError: true})
@@ -41,8 +55,12 @@ func main() {
 
 	adminMW := middleware.AdminAuth(adminSvc)
 
+	// Clean up orphaned files on startup (files without a DB record, e.g.
+	// from a previous crash before the DB-first ordering was introduced).
+	fileSvc.CleanupOrphans()
+
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			fileSvc.CleanupExpired()

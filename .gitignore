@@ -3,6 +3,11 @@ server/server.exe
 server/data/
 server/uploads/
 server/logs/
+server/*.log
+server/*.err
+server/stdout.txt
+server/stderr.txt
+/send.tar.gz
 
 # Frontend
 web/node_modules/

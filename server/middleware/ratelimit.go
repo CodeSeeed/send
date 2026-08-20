@@ -25,19 +25,19 @@ type entry struct {
 }
 
 type RateLimiter struct {
-	mu        sync.RWMutex
-	ips       map[string]*entry
-	tier      RateLimitTier
-	skipLocal bool
-	stopCh    chan struct{}
+	mu                 sync.RWMutex
+	ips                map[string]*entry
+	tier               RateLimitTier
+	rateLimitLocalhost bool
+	stopCh             chan struct{}
 }
 
-func NewRateLimiter(tier RateLimitTier, skipLocal bool) *RateLimiter {
+func NewRateLimiter(tier RateLimitTier, rateLimitLocalhost bool) *RateLimiter {
 	rl := &RateLimiter{
-		ips:       make(map[string]*entry),
-		tier:      tier,
-		skipLocal: skipLocal,
-		stopCh:    make(chan struct{}),
+		ips:                make(map[string]*entry),
+		tier:               tier,
+		rateLimitLocalhost: rateLimitLocalhost,
+		stopCh:             make(chan struct{}),
 	}
 	go rl.cleanupLoop()
 	return rl
@@ -46,7 +46,7 @@ func NewRateLimiter(tier RateLimitTier, skipLocal bool) *RateLimiter {
 func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
-		if rl.skipLocal && (ip == "127.0.0.1" || ip == "::1") {
+		if !rl.rateLimitLocalhost && (ip == "127.0.0.1" || ip == "::1") {
 			c.Next()
 			return
 		}

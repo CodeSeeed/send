@@ -76,6 +76,11 @@ func (ctr *AdminController) Check(c *gin.Context) {
 }
 
 func (ctr *AdminController) Logout(c *gin.Context) {
+	adminID := c.GetUint("admin_id")
+	if err := ctr.adminSvc.InvalidateToken(adminID); err != nil {
+		utils.Error(c, 500, "登出失败")
+		return
+	}
 	clearAdminCookie(c)
 	utils.Success(c, nil)
 }
@@ -109,12 +114,24 @@ func (ctr *AdminController) ChangePassword(c *gin.Context) {
 }
 
 func (ctr *AdminController) ListFiles(c *gin.Context) {
-	files, err := ctr.adminSvc.ListAllFiles()
+	keyword := c.Query("keyword")
+	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+	pageSize, err := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+	if err != nil || pageSize < 1 {
+		pageSize = 10
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	result, err := ctr.adminSvc.ListAllFiles(keyword, page, pageSize)
 	if err != nil {
 		utils.Error(c, 500, "获取文件列表失败")
 		return
 	}
-	utils.Success(c, gin.H{"files": files})
+	utils.Success(c, result)
 }
 
 func (ctr *AdminController) DeleteFile(c *gin.Context) {
@@ -160,6 +177,13 @@ func (ctr *AdminController) UpdateSettings(c *gin.Context) {
 	utils.Success(c, settings)
 }
 
+// isSecureRequest reports whether the session cookie should carry the Secure
+// flag: either the app terminated TLS itself, or a TLS-terminating reverse
+// proxy announced it via X-Forwarded-Proto: https.
+func isSecureRequest(c *gin.Context) bool {
+	return c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+}
+
 func setAdminCookie(c *gin.Context, token string) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_token",
@@ -167,6 +191,7 @@ func setAdminCookie(c *gin.Context, token string) {
 		Path:     "/",
 		MaxAge:   int(24 * time.Hour / time.Second),
 		HttpOnly: true,
+		Secure:   isSecureRequest(c),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
@@ -178,6 +203,7 @@ func clearAdminCookie(c *gin.Context) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   isSecureRequest(c),
 		SameSite: http.SameSiteStrictMode,
 	})
 }

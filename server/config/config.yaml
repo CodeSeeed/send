@@ -1,8 +1,17 @@
 server:
   port: "8081"
-  # allowed_origins:  # uncomment to restrict CORS (empty = allow all)
-  #   - https://send.example.com
+  static_dir: ../web/dist  # path to built frontend (relative to server/ directory)
+  allowed_origins:
+    - http://localhost:5174
+    - http://127.0.0.1:5174
   rate_limit_localhost: false  # true = rate limit localhost too
+  # trusted_proxies:  # uncomment when behind a reverse proxy you control.
+  #   When empty, gin trusts nobody and derives client IP from the direct TCP connection,
+  #   which prevents X-Forwarded-For spoofing from bypassing rate limits.
+  #   Behind a reverse proxy, add its IPs here AND configure the proxy to overwrite
+  #   (not append) X-Forwarded-For, e.g. nginx: proxy_set_header X-Forwarded-For $remote_addr;
+  #   - 127.0.0.1
+  #   - ::1
 
 database:
   path: data/send.db
@@ -12,6 +21,7 @@ upload:
   max_size: 31457280
   default_expire_hours: 168
   code_length: 8
+  receive_code_length: 8
   max_expire_hours: 8760
   allowed_extensions:
     - .zip

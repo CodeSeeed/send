@@ -12,9 +12,11 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port              string `yaml:"port"`
-	AllowedOrigins    []string `yaml:"allowed_origins"`
-	RateLimitLocalhost bool   `yaml:"rate_limit_localhost"`
+	Port               string   `yaml:"port"`
+	StaticDir          string   `yaml:"static_dir"`
+	AllowedOrigins     []string `yaml:"allowed_origins"`
+	RateLimitLocalhost bool     `yaml:"rate_limit_localhost"`
+	TrustedProxies     []string `yaml:"trusted_proxies"`
 }
 
 type DatabaseConfig struct {
@@ -26,6 +28,7 @@ type UploadConfig struct {
 	MaxSize            int64    `yaml:"max_size"`
 	DefaultExpireHours int      `yaml:"default_expire_hours"`
 	CodeLength         int      `yaml:"code_length"`
+	ReceiveCodeLength  int      `yaml:"receive_code_length"`
 	AllowedExtensions  []string `yaml:"allowed_extensions"`
 	AllowedMimeTypes   []string `yaml:"allowed_mime_types"`
 	MaxExpireHours     int      `yaml:"max_expire_hours"`
@@ -34,7 +37,8 @@ type UploadConfig struct {
 func Default() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Port: "8080",
+			Port:      "8080",
+			StaticDir: "../web/dist",
 		},
 		Database: DatabaseConfig{
 			Path: "data/send.db",
@@ -44,6 +48,7 @@ func Default() *Config {
 			MaxSize:            30 << 20,
 			DefaultExpireHours: 168,
 			CodeLength:         8,
+			ReceiveCodeLength:  8,
 			AllowedExtensions:  []string{".zip", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".mp4", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".7z", ".rar", ".csv", ".json", ".md"},
 			AllowedMimeTypes: []string{
 				"application/zip", "application/pdf", "application/x-rar-compressed", "application/x-7z-compressed",

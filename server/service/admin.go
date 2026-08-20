@@ -83,8 +83,8 @@ func (s *AdminService) Login(username, password string) (string, error) {
 	now := time.Now()
 	expiresAt := now.Add(TokenTTL)
 	result := s.db.Model(&admin).Updates(map[string]interface{}{
-		"token":             token,
-		"token_expires_at":  expiresAt,
+		"token":            token,
+		"token_expires_at": expiresAt,
 	})
 	if result.Error != nil {
 		return "", errors.New("登录失败")
@@ -137,10 +137,34 @@ func (s *AdminService) ChangePassword(adminID uint, oldPwd, newPwd string) error
 	return nil
 }
 
-// ListAllFiles returns all files regardless of manage token
-func (s *AdminService) ListAllFiles() ([]FileInfo, error) {
+// InvalidateToken revokes the stored session token, so an already-revoked
+// cookie/header token can no longer be used until the admin logs in again.
+func (s *AdminService) InvalidateToken(adminID uint) error {
+	return s.db.Model(&model.Admin{}).
+		Where("id = ?", adminID).
+		Updates(map[string]interface{}{"token": "", "token_expires_at": nil}).Error
+}
+
+// FileListResult is the paginated response for the admin file list.
+type FileListResult struct {
+	Files    []FileInfo `json:"files"`
+	Total    int64      `json:"total"`
+	Page     int        `json:"page"`
+	PageSize int        `json:"page_size"`
+}
+
+func (s *AdminService) ListAllFiles(keyword string, page, pageSize int) (*FileListResult, error) {
+	query := s.db.Model(&model.File{})
+	if keyword != "" {
+		like := "%" + keyword + "%"
+		query = query.Where("file_name LIKE ? OR code LIKE ? OR receive_code LIKE ?", like, like, like)
+	}
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, err
+	}
 	var files []model.File
-	if err := s.db.Order("created_at DESC").Find(&files).Error; err != nil {
+	if err := query.Order("created_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&files).Error; err != nil {
 		return nil, err
 	}
 	result := make([]FileInfo, len(files))
@@ -148,15 +172,22 @@ func (s *AdminService) ListAllFiles() ([]FileInfo, error) {
 		result[i] = FileInfo{
 			ID:            f.ID,
 			Code:          f.Code,
+			ReceiveCode:   f.ReceiveCode,
 			FileName:      f.FileName,
 			FileSize:      f.FileSize,
 			DownloadCount: f.DownloadCount,
+			MaxDownloads:  f.MaxDownloads,
 			HasPassword:   f.PasswordHash != "",
 			ExpireAt:      f.ExpireAt,
 			CreatedAt:     f.CreatedAt,
 		}
 	}
-	return result, nil
+	return &FileListResult{
+		Files:    result,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
 }
 
 // DeleteFile deletes any file by ID (admin only)
@@ -182,6 +213,9 @@ func validatePasswordComplexity(password string) error {
 	}
 	if len(password) > 128 {
 		return errors.New("密码长度不能超过128位")
+	}
+	if len(password) > utils.MaxPasswordBytes {
+		return errors.New("密码过长")
 	}
 	hasUpper := false
 	hasDigit := false

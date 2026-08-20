@@ -5,6 +5,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -67,6 +68,10 @@ func (ctr *FileController) Upload(c *gin.Context) {
 		utils.Error(c, 400, "访问密码长度不能少于4位")
 		return
 	}
+	if len(password) > utils.MaxPasswordBytes {
+		utils.Error(c, 400, "访问密码过长")
+		return
+	}
 
 	expireHoursText, hasExpireHours := c.GetPostForm("expire_hours")
 	expireMinutesText, hasExpireMinutes := c.GetPostForm("expire_minutes")
@@ -103,24 +108,31 @@ func (ctr *FileController) Upload(c *gin.Context) {
 		return
 	}
 
-	params := &service.CreateFileParams{
-		FileName:      fileName,
-		FileSize:      file.Size,
-		Password:      password,
-		ExpireHours:   expireHours,
-		ExpireMinutes: expireMinutes,
+	maxDownloads := int64(0)
+	if maxDownloadsText, ok := c.GetPostForm("max_downloads"); ok && maxDownloadsText != "" {
+		md, err := strconv.ParseInt(maxDownloadsText, 10, 64)
+		if err != nil || md <= 0 {
+			utils.Error(c, 400, "下载次数必须是大于0的整数")
+			return
+		}
+		if md > 1000000 {
+			utils.Error(c, 400, "下载次数过大")
+			return
+		}
+		maxDownloads = md
 	}
 
-	result, err := ctr.svc.Create(params)
-	if err != nil {
-		utils.Error(c, 500, "上传失败")
-		return
+	generateReceiveCode := false
+	if value, ok := c.GetPostForm("generate_receive_code"); ok && value != "" {
+		generateReceiveCode, err = strconv.ParseBool(value)
+		if err != nil {
+			utils.Error(c, 400, "收件码参数错误")
+			return
+		}
 	}
 
-	dst := filepath.Join(ctr.cfg.Upload.Dir, result.Code)
 	src, err := file.Open()
 	if err != nil {
-		ctr.svc.DeleteByID(result.Code)
 		utils.Error(c, 500, "上传失败")
 		return
 	}
@@ -132,9 +144,6 @@ func (ctr *FileController) Upload(c *gin.Context) {
 	if n > 0 {
 		mimeType := mimetype.Detect(header[:n]).String()
 		if !ctr.isAllowedMimeType(mimeType) {
-			src.Close()
-			os.Remove(dst)
-			ctr.svc.DeleteByID(result.Code)
 			utils.Error(c, 400, "文件类型不被允许")
 			return
 		}
@@ -142,9 +151,28 @@ func (ctr *FileController) Upload(c *gin.Context) {
 	// Reset to beginning for actual copy
 	src.Seek(0, 0)
 
+	// Create DB record FIRST (with auto-generated code, retry on duplicate).
+	// This is the atomic reservation — no other request can claim the same code.
+	params := &service.CreateFileParams{
+		FileName:            fileName,
+		FileSize:            file.Size,
+		Password:            password,
+		ExpireHours:         expireHours,
+		ExpireMinutes:       expireMinutes,
+		MaxDownloads:        maxDownloads,
+		GenerateReceiveCode: generateReceiveCode,
+	}
+	result, err := ctr.svc.Create(params)
+	if err != nil {
+		utils.Error(c, 500, "上传失败")
+		return
+	}
+
+	// Write file to disk using the reserved code.
+	dst := filepath.Join(ctr.cfg.Upload.Dir, result.Code)
 	out, err := os.Create(dst)
 	if err != nil {
-		ctr.svc.DeleteByID(result.Code)
+		ctr.svc.DeleteByCode(result.Code)
 		utils.Error(c, 500, "上传失败")
 		return
 	}
@@ -153,7 +181,7 @@ func (ctr *FileController) Upload(c *gin.Context) {
 	closeErr := out.Close()
 	if copyErr != nil || closeErr != nil || written != file.Size {
 		os.Remove(dst)
-		ctr.svc.DeleteByID(result.Code)
+		ctr.svc.DeleteByCode(result.Code)
 		utils.Error(c, 500, "上传失败")
 		return
 	}
@@ -164,6 +192,23 @@ func (ctr *FileController) Upload(c *gin.Context) {
 func (ctr *FileController) Info(c *gin.Context) {
 	code := c.Param("code")
 	info, err := ctr.svc.GetByCode(code)
+	if err != nil {
+		utils.Error(c, 404, err.Error())
+		return
+	}
+	utils.Success(c, info)
+}
+
+func (ctr *FileController) Receive(c *gin.Context) {
+	var req struct {
+		ReceiveCode string `json:"receive_code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.Error(c, 400, "请输入收件码")
+		return
+	}
+
+	info, err := ctr.svc.GetByReceiveCode(req.ReceiveCode)
 	if err != nil {
 		utils.Error(c, 404, err.Error())
 		return
@@ -219,8 +264,66 @@ func (ctr *FileController) Download(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(fileName)}))
+	c.Header("Content-Disposition", formatContentDisposition(filepath.Base(fileName)))
 	c.Header("Content-Type", "application/octet-stream")
+	c.File(filePath)
+}
+
+// previewableMimeTypes are the content types that the browser can render inline.
+var previewableMimeTypes = map[string]bool{
+	"application/pdf":  true,
+	"image/png":        true,
+	"image/jpeg":       true,
+	"image/gif":        true,
+	"image/webp":       true,
+	"text/plain":       true,
+	"text/csv":         true,
+	"text/markdown":    true,
+	"application/json": true,
+}
+
+func (ctr *FileController) Preview(c *gin.Context) {
+	code := c.Param("code")
+
+	// Read token from Authorization: Bearer header
+	authHeader := c.GetHeader("Authorization")
+	token := ""
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	if token == "" {
+		utils.Error(c, 403, "缺少预览凭证")
+		return
+	}
+
+	clientIP := c.ClientIP()
+	// Peek validates without consuming the token — the same token can still be
+	// used for a subsequent download (or another preview).
+	if !service.ValidateDownloadTokenPeek(token, code, clientIP) {
+		utils.Error(c, 403, "预览凭证无效或已过期")
+		return
+	}
+
+	filePath, fileName, err := ctr.svc.GetFilePathForPreview(code)
+	if err != nil {
+		utils.Error(c, 404, err.Error())
+		return
+	}
+
+	// Detect MIME type from the file content (not from extension or user input)
+	mimeType, err := mimetype.DetectFile(filePath)
+	if err != nil {
+		utils.Error(c, 500, "读取文件类型失败")
+		return
+	}
+	mimeStr := mimeType.String()
+	if !previewableMimeTypes[mimeStr] {
+		utils.Error(c, 400, "该文件类型不支持预览")
+		return
+	}
+
+	c.Header("Content-Disposition", "inline; filename="+url.PathEscape(fileName))
+	c.Header("Content-Type", mimeStr)
 	c.File(filePath)
 }
 
@@ -300,4 +403,33 @@ func sanitizeFileName(name string) string {
 		sanitized = "unnamed"
 	}
 	return sanitized
+}
+
+// formatContentDisposition builds a Content-Disposition header that keeps the
+// original (possibly non-ASCII) filename via RFC 5987/2231 filename*= while
+// also providing a pure-ASCII filename= fallback for clients that cannot parse
+// the extended form.
+func formatContentDisposition(filename string) string {
+	base := filepath.Base(filename)
+	// ASCII-safe fallback: strip non-ASCII runes, keep extension shape
+	var b strings.Builder
+	for _, r := range base {
+		if r >= 32 && r <= 126 {
+			b.WriteRune(r)
+		}
+	}
+	fallback := b.String()
+	if strings.TrimSpace(fallback) == "" {
+		fallback = "download"
+	}
+	fallback = strings.ReplaceAll(fallback, `"`, `'`)
+
+	header := mime.FormatMediaType("attachment", map[string]string{"filename": fallback})
+	// Append original name in RFC 5987 form when it differs from the ASCII fallback
+	if base != fallback {
+		encoded := url.QueryEscape(base)
+		encoded = strings.ReplaceAll(encoded, "+", "%20")
+		header += "; filename*=UTF-8''" + encoded
+	}
+	return header
 }

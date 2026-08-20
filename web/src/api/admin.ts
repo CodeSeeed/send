@@ -1,5 +1,5 @@
 import request from '../utils/request'
-import type { ApiResponse, ManageFile } from '../types'
+import type { ApiResponse, FileListResult } from '../types'
 
 export function adminStatus(): Promise<ApiResponse<{ registered: boolean }>> {
   return request.get('/admin/status')
@@ -25,8 +25,14 @@ export function adminChangePassword(oldPwd: string, newPwd: string): Promise<Api
   return request.post('/admin/password', { old_password: oldPwd, new_password: newPwd })
 }
 
-export function adminListFiles(): Promise<ApiResponse<{ files: ManageFile[] }>> {
-  return request.get('/admin/files')
+export function adminListFiles(
+  keyword = '',
+  page = 1,
+  pageSize = 10,
+): Promise<ApiResponse<FileListResult>> {
+  return request.get('/admin/files', {
+    params: { keyword, page, page_size: pageSize },
+  })
 }
 
 export function adminDeleteFile(id: number): Promise<ApiResponse<void>> {

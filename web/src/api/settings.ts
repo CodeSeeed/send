@@ -9,10 +9,6 @@ export interface SystemSettings {
   updated_at: string
 }
 
-export function getSettings(): Promise<ApiResponse<SystemSettings>> {
-  return request.get('/settings')
-}
-
 export function adminGetSettings(): Promise<ApiResponse<SystemSettings>> {
   return request.get('/admin/settings')
 }
