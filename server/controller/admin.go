@@ -34,8 +34,10 @@ func (ctr *AdminController) Login(c *gin.Context) {
 		utils.Error(c, 401, err.Error())
 		return
 	}
+	// The session token goes into the HttpOnly cookie only — never into the
+	// response body, where JavaScript could read it.
 	setAdminCookie(c, token)
-	utils.Success(c, gin.H{"token": token})
+	utils.Success(c, nil)
 }
 
 func (ctr *AdminController) AdminStatus(c *gin.Context) {
@@ -56,17 +58,15 @@ func (ctr *AdminController) Register(c *gin.Context) {
 		utils.Error(c, 400, "参数错误")
 		return
 	}
-	if len(req.Password) > 128 {
-		utils.Error(c, 400, "密码长度不能超过128位")
-		return
-	}
 	token, err := ctr.adminSvc.Register(req.Username, req.Password)
 	if err != nil {
 		utils.Error(c, 409, err.Error())
 		return
 	}
+	// The session token goes into the HttpOnly cookie only — never into the
+	// response body, where JavaScript could read it.
 	setAdminCookie(c, token)
-	utils.Success(c, gin.H{"token": token})
+	utils.Success(c, nil)
 }
 
 func (ctr *AdminController) Check(c *gin.Context) {
@@ -98,10 +98,6 @@ func (ctr *AdminController) ChangePassword(c *gin.Context) {
 	}
 	if req.NewPassword == "" {
 		utils.Error(c, 400, "新密码不能为空")
-		return
-	}
-	if len(req.NewPassword) > 128 {
-		utils.Error(c, 400, "密码长度不能超过128位")
 		return
 	}
 	if err := ctr.adminSvc.ChangePassword(adminID, req.OldPassword, req.NewPassword); err != nil {

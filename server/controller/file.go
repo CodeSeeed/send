@@ -238,15 +238,21 @@ func (ctr *FileController) VerifyPassword(c *gin.Context) {
 	utils.Success(c, gin.H{"download_token": token})
 }
 
+// bearerToken extracts the token from an Authorization: Bearer header,
+// returning "" when the header is absent or not in Bearer form.
+func bearerToken(c *gin.Context) string {
+	authHeader := c.GetHeader("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	return ""
+}
+
 func (ctr *FileController) Download(c *gin.Context) {
 	code := c.Param("code")
 
 	// Read token from Authorization: Bearer header (keeps it out of logs & history)
-	authHeader := c.GetHeader("Authorization")
-	token := ""
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	token := bearerToken(c)
 	if token == "" {
 		utils.Error(c, 403, "缺少下载凭证")
 		return
@@ -286,11 +292,7 @@ func (ctr *FileController) Preview(c *gin.Context) {
 	code := c.Param("code")
 
 	// Read token from Authorization: Bearer header
-	authHeader := c.GetHeader("Authorization")
-	token := ""
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	token := bearerToken(c)
 	if token == "" {
 		utils.Error(c, 403, "缺少预览凭证")
 		return

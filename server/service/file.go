@@ -41,7 +41,11 @@ func GenerateDownloadToken(code string, clientIP string) string {
 	return token
 }
 
-func ValidateDownloadToken(token, code, clientIP string) bool {
+// validateDownloadToken checks a token against the in-memory store. When
+// consume is true the token is deleted on success (downloads); when false the
+// token is left intact (previews, so the same token can still be used to
+// download afterwards).
+func validateDownloadToken(token, code, clientIP string, consume bool) bool {
 	tokenMu.Lock()
 	defer tokenMu.Unlock()
 
@@ -60,33 +64,21 @@ func ValidateDownloadToken(token, code, clientIP string) bool {
 		downloadTokens.Delete(token)
 		return false
 	}
-	downloadTokens.Delete(token)
+	if consume {
+		downloadTokens.Delete(token)
+	}
 	return true
+}
+
+func ValidateDownloadToken(token, code, clientIP string) bool {
+	return validateDownloadToken(token, code, clientIP, true)
 }
 
 // ValidateDownloadTokenPeek validates a download token without consuming it.
 // Use this for previews so the same token remains available for a subsequent
 // download attempt.
 func ValidateDownloadTokenPeek(token, code, clientIP string) bool {
-	tokenMu.Lock()
-	defer tokenMu.Unlock()
-
-	val, ok := downloadTokens.Load(token)
-	if !ok {
-		return false
-	}
-	dt := val.(*downloadToken)
-	if dt.code != code {
-		return false
-	}
-	if dt.clientIP != clientIP {
-		return false
-	}
-	if time.Since(dt.createdAt) > tokenTTL {
-		downloadTokens.Delete(token)
-		return false
-	}
-	return true
+	return validateDownloadToken(token, code, clientIP, false)
 }
 
 // CleanupExpiredTokens removes expired download tokens periodically

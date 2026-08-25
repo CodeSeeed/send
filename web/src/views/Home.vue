@@ -30,14 +30,29 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { receiveFile } from '../api/file'
+import { adminStatus } from '../api/admin'
 
 const router = useRouter()
 const receiveCode = ref('')
 const loading = ref(false)
+
+onMounted(async () => {
+  // First-run setup: with no admin account, the only meaningful destination is
+  // the registration page. AdminLogin shows the register form when
+  // /admin/status reports registered: false.
+  try {
+    const res = await adminStatus()
+    if (res.data?.registered === false) {
+      router.replace('/admin/login')
+    }
+  } catch {
+    // Status check failed (e.g. offline) — keep the public receive page usable.
+  }
+})
 
 function normalizeCode(value: string) {
   receiveCode.value = value.toUpperCase().replace(/[^A-Z0-9]/g, '')

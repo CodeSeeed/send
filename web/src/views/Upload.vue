@@ -140,9 +140,15 @@ const shareUrl = computed(() => {
 })
 
 watch(shareUrl, async (url) => {
-  if (url) {
+  if (!url) {
+    qrDataUrl.value = ''
+    return
+  }
+  try {
     qrDataUrl.value = await QRCode.toDataURL(url, { width: 320, margin: 1 })
-  } else {
+  } catch {
+    // QR generation can fail in exotic environments (missing canvas support);
+    // the share link is still displayed, so the QR code is purely optional.
     qrDataUrl.value = ''
   }
 })

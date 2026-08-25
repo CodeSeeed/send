@@ -105,6 +105,10 @@ const previewLoading = ref(false)
 const previewDataUrl = ref('')
 const previewType = ref<'pdf' | 'image' | 'text' | 'unsupported'>('unsupported')
 const previewText = ref('')
+// Reuse a download token only while it is comfortably inside the server-side
+// TTL (2 minutes, server/service/file.go tokenTTL). This mirrors the server
+// constant: if the server TTL changes, keep this below it so the client never
+// presents a token that already expired server-side.
 const DOWNLOAD_TOKEN_REUSE_MS = 110 * 1000
 
 const downloadLimitReached = computed(() => {

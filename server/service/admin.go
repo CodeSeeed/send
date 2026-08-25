@@ -36,7 +36,7 @@ func (s *AdminService) Register(username, password string) (string, error) {
 	if username == "" || password == "" {
 		return "", errors.New("用户名和密码不能为空")
 	}
-	if err := validatePasswordComplexity(password); err != nil {
+	if err := enforceAdminPasswordPolicy(password); err != nil {
 		return "", err
 	}
 
@@ -115,7 +115,7 @@ func (s *AdminService) ChangePassword(adminID uint, oldPwd, newPwd string) error
 	if !utils.CheckPassword(oldPwd, admin.Password) {
 		return errors.New("原密码错误")
 	}
-	if err := validatePasswordComplexity(newPwd); err != nil {
+	if err := enforceAdminPasswordPolicy(newPwd); err != nil {
 		return err
 	}
 	hash, err := utils.HashPassword(newPwd)
@@ -168,19 +168,8 @@ func (s *AdminService) ListAllFiles(keyword string, page, pageSize int) (*FileLi
 		return nil, err
 	}
 	result := make([]FileInfo, len(files))
-	for i, f := range files {
-		result[i] = FileInfo{
-			ID:            f.ID,
-			Code:          f.Code,
-			ReceiveCode:   f.ReceiveCode,
-			FileName:      f.FileName,
-			FileSize:      f.FileSize,
-			DownloadCount: f.DownloadCount,
-			MaxDownloads:  f.MaxDownloads,
-			HasPassword:   f.PasswordHash != "",
-			ExpireAt:      f.ExpireAt,
-			CreatedAt:     f.CreatedAt,
-		}
+	for i := range files {
+		result[i] = *fileInfoFromModel(&files[i])
 	}
 	return &FileListResult{
 		Files:    result,
@@ -206,16 +195,16 @@ func (s *AdminService) DeleteFile(id uint) error {
 	return nil
 }
 
-// validatePasswordComplexity enforces a minimum password strength for admin accounts.
-func validatePasswordComplexity(password string) error {
+// enforceAdminPasswordPolicy enforces the password requirements for admin
+// accounts: minimum length, character class coverage, and a length cap.
+// The 128-character cap is below MaxPasswordBytes (512), so bcrypt pre-hashing
+// (utils.HashPassword) is always safe here.
+func enforceAdminPasswordPolicy(password string) error {
 	if len(password) < 8 {
 		return errors.New("密码长度不能少于8位")
 	}
 	if len(password) > 128 {
 		return errors.New("密码长度不能超过128位")
-	}
-	if len(password) > utils.MaxPasswordBytes {
-		return errors.New("密码过长")
 	}
 	hasUpper := false
 	hasDigit := false

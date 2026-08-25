@@ -5,11 +5,13 @@ export function adminStatus(): Promise<ApiResponse<{ registered: boolean }>> {
   return request.get('/admin/status')
 }
 
-export function adminRegister(username: string, password: string): Promise<ApiResponse<{ token: string }>> {
+// The session token is set server-side as an HttpOnly cookie; it never
+// appears in the response body.
+export function adminRegister(username: string, password: string): Promise<ApiResponse<void>> {
   return request.post('/admin/register', { username, password })
 }
 
-export function adminLogin(username: string, password: string): Promise<ApiResponse<{ token: string }>> {
+export function adminLogin(username: string, password: string): Promise<ApiResponse<void>> {
   return request.post('/admin/login', { username, password })
 }
 
