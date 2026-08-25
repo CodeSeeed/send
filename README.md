@@ -90,3 +90,7 @@ npm run build
 - `server/model`：SQLite 数据模型
 - `web/src/views`：上传、分享、登录和管理页面
 - `web/src/api`：前端 API 封装
+
+## 许可证
+
+[MIT](LICENSE)
