@@ -12,12 +12,18 @@ import (
 )
 
 type AdminController struct {
-	adminSvc    *service.AdminService
-	settingsSvc *service.SettingsService
+	adminSvc            *service.AdminService
+	settingsSvc         *service.SettingsService
+	trustForwardedProto bool
 }
 
-func NewAdminController(adminSvc *service.AdminService, settingsSvc *service.SettingsService) *AdminController {
-	return &AdminController{adminSvc: adminSvc, settingsSvc: settingsSvc}
+// NewAdminController builds the admin controller. trustForwardedProto reports
+// whether the deployment sits behind a configured reverse proxy (i.e.
+// trusted_proxies is non-empty). Only then may a client-supplied
+// X-Forwarded-Proto header be honored — otherwise a direct client could spoof
+// it to flip the Secure cookie flag.
+func NewAdminController(adminSvc *service.AdminService, settingsSvc *service.SettingsService, trustForwardedProto bool) *AdminController {
+	return &AdminController{adminSvc: adminSvc, settingsSvc: settingsSvc, trustForwardedProto: trustForwardedProto}
 }
 
 func (ctr *AdminController) Login(c *gin.Context) {
@@ -36,7 +42,7 @@ func (ctr *AdminController) Login(c *gin.Context) {
 	}
 	// The session token goes into the HttpOnly cookie only — never into the
 	// response body, where JavaScript could read it.
-	setAdminCookie(c, token)
+	ctr.setAdminCookie(c, token)
 	utils.Success(c, nil)
 }
 
@@ -65,7 +71,7 @@ func (ctr *AdminController) Register(c *gin.Context) {
 	}
 	// The session token goes into the HttpOnly cookie only — never into the
 	// response body, where JavaScript could read it.
-	setAdminCookie(c, token)
+	ctr.setAdminCookie(c, token)
 	utils.Success(c, nil)
 }
 
@@ -81,7 +87,7 @@ func (ctr *AdminController) Logout(c *gin.Context) {
 		utils.Error(c, 500, "登出失败")
 		return
 	}
-	clearAdminCookie(c)
+	ctr.clearAdminCookie(c)
 	utils.Success(c, nil)
 }
 
@@ -105,7 +111,7 @@ func (ctr *AdminController) ChangePassword(c *gin.Context) {
 		return
 	}
 	// Clear cookie so user re-logs in with new password
-	clearAdminCookie(c)
+	ctr.clearAdminCookie(c)
 	utils.Success(c, nil)
 }
 
@@ -174,32 +180,36 @@ func (ctr *AdminController) UpdateSettings(c *gin.Context) {
 }
 
 // isSecureRequest reports whether the session cookie should carry the Secure
-// flag: either the app terminated TLS itself, or a TLS-terminating reverse
-// proxy announced it via X-Forwarded-Proto: https.
-func isSecureRequest(c *gin.Context) bool {
-	return c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
+// flag. The X-Forwarded-Proto header is only honored when a reverse proxy is
+// configured (trusted_proxies non-empty): without a trusted proxy the header is
+// client-controlled and must not drive cookie behavior.
+func (ctr *AdminController) isSecureRequest(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+	return ctr.trustForwardedProto && c.GetHeader("X-Forwarded-Proto") == "https"
 }
 
-func setAdminCookie(c *gin.Context, token string) {
+func (ctr *AdminController) setAdminCookie(c *gin.Context, token string) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_token",
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(24 * time.Hour / time.Second),
 		HttpOnly: true,
-		Secure:   isSecureRequest(c),
+		Secure:   ctr.isSecureRequest(c),
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func clearAdminCookie(c *gin.Context) {
+func (ctr *AdminController) clearAdminCookie(c *gin.Context) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "admin_token",
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   isSecureRequest(c),
+		Secure:   ctr.isSecureRequest(c),
 		SameSite: http.SameSiteStrictMode,
 	})
 }

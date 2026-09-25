@@ -1,5 +1,5 @@
 import request from '../utils/request'
-import type { ApiResponse, UploadResult, FileInfo } from '../types'
+import type { ApiResponse, UploadResult, PublicFileInfo } from '../types'
 
 export function uploadFile(
   file: File,
@@ -29,11 +29,11 @@ export function uploadFile(
   })
 }
 
-export function getFileInfo(code: string): Promise<ApiResponse<FileInfo>> {
+export function getFileInfo(code: string): Promise<ApiResponse<PublicFileInfo>> {
   return request.get(`/files/${code}`)
 }
 
-export function receiveFile(receiveCode: string): Promise<ApiResponse<FileInfo>> {
+export function receiveFile(receiveCode: string): Promise<ApiResponse<PublicFileInfo>> {
   return request.post('/files/receive', { receive_code: receiveCode })
 }
 
@@ -50,7 +50,9 @@ export async function downloadFile(code: string, token: string): Promise<void> {
   })
   if (!response.ok) {
     const err = await response.json().catch(() => ({ message: '下载失败' }))
-    throw new Error(err.message || '下载失败')
+    const error = new Error(err.message || '下载失败') as Error & { status?: number }
+    error.status = response.status
+    throw error
   }
   const blob = await response.blob()
   const filename = extractFilename(response.headers.get('Content-Disposition') || '')
@@ -76,7 +78,9 @@ export async function previewFile(code: string, token: string): Promise<{ blob: 
   })
   if (!response.ok) {
     const err = await response.json().catch(() => ({ message: '预览失败' }))
-    throw new Error(err.message || '预览失败')
+    const error = new Error(err.message || '预览失败') as Error & { status?: number }
+    error.status = response.status
+    throw error
   }
   const blob = await response.blob()
   return { blob, mimeType: response.headers.get('Content-Type') || '' }

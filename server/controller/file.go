@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -228,7 +229,11 @@ func (ctr *FileController) VerifyPassword(c *gin.Context) {
 	}
 
 	if err := ctr.svc.VerifyPassword(code, req.Password); err != nil {
-		utils.Error(c, 403, err.Error())
+		if errors.Is(err, service.ErrDownloadLimit) {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		utils.Error(c, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -266,7 +271,11 @@ func (ctr *FileController) Download(c *gin.Context) {
 
 	filePath, fileName, err := ctr.svc.GetFilePath(code)
 	if err != nil {
-		utils.Error(c, 404, err.Error())
+		if errors.Is(err, service.ErrDownloadLimit) {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		utils.Error(c, http.StatusNotFound, err.Error())
 		return
 	}
 
@@ -308,7 +317,11 @@ func (ctr *FileController) Preview(c *gin.Context) {
 
 	filePath, fileName, err := ctr.svc.GetFilePathForPreview(code)
 	if err != nil {
-		utils.Error(c, 404, err.Error())
+		if errors.Is(err, service.ErrDownloadLimit) {
+			utils.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		utils.Error(c, http.StatusNotFound, err.Error())
 		return
 	}
 

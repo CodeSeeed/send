@@ -1,9 +1,11 @@
 package service
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"send/server/config"
@@ -194,11 +196,11 @@ func TestDownloadLimitBlocksTokenVerificationAndPreview(t *testing.T) {
 	}
 
 	svc := NewFileService(db, &config.Config{})
-	if err := svc.VerifyPassword(limited.Code, ""); err == nil || err.Error() != "下载次数已达上限" {
-		t.Fatalf("VerifyPassword() error = %v, want download limit error", err)
+	if err := svc.VerifyPassword(limited.Code, ""); err != ErrDownloadLimit {
+		t.Fatalf("VerifyPassword() error = %v, want ErrDownloadLimit", err)
 	}
-	if _, _, err := svc.GetFilePathForPreview(limited.Code); err == nil || err.Error() != "下载次数已达上限" {
-		t.Fatalf("GetFilePathForPreview() error = %v, want download limit error", err)
+	if _, _, err := svc.GetFilePathForPreview(limited.Code); err != ErrDownloadLimit {
+		t.Fatalf("GetFilePathForPreview() error = %v, want ErrDownloadLimit", err)
 	}
 
 	if err := db.Model(limited).UpdateColumn("download_count", 0).Error; err != nil {
@@ -213,5 +215,107 @@ func TestDownloadLimitBlocksTokenVerificationAndPreview(t *testing.T) {
 	}
 	if path != filePath || name != limited.FileName {
 		t.Fatalf("preview result = (%q, %q), want (%q, %q)", path, name, filePath, limited.FileName)
+	}
+}
+
+func TestSameClientIP(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		// IPv4 must match exactly — a different client is a different client.
+		{"ipv4 identical", "203.0.113.5", "203.0.113.5", true},
+		{"ipv4 differ last octet", "203.0.113.5", "203.0.113.9", false},
+		{"ipv4 differ subnet", "203.0.113.5", "203.0.114.5", false},
+
+		// IPv6 privacy-extension rotation stays within the same /64, so the
+		// same client rotating its interface id should still validate.
+		{"ipv6 same /64 rotated suffix", "2001:db8::1:2345:6789", "2001:db8::1:c9d1:e2f3", true},
+		{"ipv6 different /64", "2001:db8:1::1", "2001:db8:2::1", false},
+		{"ipv6 identical", "2001:db8::1", "2001:db8::1", true},
+
+		// An IPv4 address and its IPv4-mapped-IPv6 form (::ffff:a.b.c.d) denote
+		// the same 32-bit host, so they must match — a client does not become a
+		// different client merely because the kernel reported its socket as v6.
+		{"ipv4 vs mapped-v6 same host", "203.0.113.5", "::ffff:203.0.113.5", true},
+
+		// Malformed or empty inputs never match a real address.
+		{"empty vs v4", "", "203.0.113.5", false},
+		{"malformed vs v4", "not-an-ip", "203.0.113.5", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sameClientIP(tc.a, tc.b); got != tc.want {
+				t.Fatalf("sameClientIP(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDownloadTokenAcceptsIPv6PrivacyRotation(t *testing.T) {
+	// A token minted for an IPv6 client must still validate after the client
+	// rotates its privacy-extension suffix within the same /64, and must be
+	// rejected once consumed or for a different /64.
+	downloadTokens = sync.Map{}
+	t.Cleanup(func() { downloadTokens = sync.Map{} })
+
+	const code = "token-share"
+	mint := "2001:db8::abcd:ef01"
+	token := GenerateDownloadToken(code, mint)
+
+	rotated := "2001:db8::1234:5678"
+	if !ValidateDownloadTokenPeek(token, code, rotated) {
+		t.Fatalf("peek with rotated IPv6 suffix rejected")
+	}
+	// Peeking must not consume the token.
+	if !ValidateDownloadToken(token, code, rotated) {
+		t.Fatalf("download with rotated IPv6 suffix rejected")
+	}
+	// Token is one-time — a second use must fail.
+	if ValidateDownloadTokenPeek(token, code, rotated) {
+		t.Fatalf("download token was not consumed by the prior download")
+	}
+
+	// A token minted for a different /64 must not validate.
+	other := GenerateDownloadToken(code, "2001:db8:1::1")
+	if ValidateDownloadTokenPeek(other, code, "2001:db8:2::1") {
+		t.Fatalf("token validated across a different /64")
+	}
+}
+
+func TestPublicFileInfoOmitsReceiveCodeAndDownloadProgress(t *testing.T) {
+	// The public file-info/receive-code response must not expose the receive
+	// code (capability separation) or download_count/max_downloads. This guards
+	// against a future field being added to the struct and silently leaking.
+	rc := "ABCDEFGH"
+	got := publicFileInfoFromModel(&model.File{
+		ID:            42,
+		Code:          "pubcode",
+		ReceiveCode:   &rc,
+		FileName:      "secret.zip",
+		FileSize:      1024,
+		DownloadCount: 3,
+		MaxDownloads:  10,
+		PasswordHash:  "hashed",
+	})
+
+	if got.Code != "pubcode" {
+		t.Fatalf("Code = %q, want %q", got.Code, "pubcode")
+	}
+	if !got.HasPassword {
+		t.Fatalf("HasPassword = false, want true")
+	}
+	// PublicFileInfo has no ReceiveCode/DownloadCount/MaxDownloads fields at
+	// all — the struct shape itself is the guarantee. Confirm by JSON round-trip
+	// that none of the sensitive fields survive serialization.
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal public info: %v", err)
+	}
+	for _, needle := range []string{rc, "receive_code", "download_count", "max_downloads"} {
+		if strings.Contains(string(raw), needle) {
+			t.Fatalf("public JSON leaks %q: %s", needle, raw)
+		}
 	}
 }

@@ -51,7 +51,7 @@ func main() {
 	}
 
 	fileCtr := controller.NewFileController(fileSvc, cfg, settingsSvc)
-	adminCtr := controller.NewAdminController(adminSvc, settingsSvc)
+	adminCtr := controller.NewAdminController(adminSvc, settingsSvc, len(cfg.Server.TrustedProxies) > 0)
 
 	adminMW := middleware.AdminAuth(adminSvc)
 

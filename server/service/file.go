@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,13 @@ import (
 
 	"gorm.io/gorm"
 )
+
+// ErrDownloadLimit is returned when a file's max_downloads quota is exhausted.
+// Controllers map it to a dedicated HTTP status (409 Conflict) so clients can
+// branch on status instead of parsing message text. 409 is used rather than
+// 403/404 — those already mean password-wrong / not-found here — and rather
+// than 429, which the IP rate-limit middleware owns.
+var ErrDownloadLimit = errors.New("下载次数已达上限")
 
 // Download token store (in-memory)
 type downloadToken struct {
@@ -41,6 +49,35 @@ func GenerateDownloadToken(code string, clientIP string) string {
 	return token
 }
 
+// sameClientIP reports whether two client-IP strings belong to the same client
+// for download-token binding purposes. IPv4 must match exactly; IPv6 matches
+// when both addresses share the same /64 prefix, which tolerates the rotating
+// suffix used by privacy extensions (RFC 4941) and mobile carriers without
+// letting an unrelated client reuse a leaked token.
+//
+// Mismatches of address family, malformed addresses, or one side being empty
+// never match — falling back to exact equality only when the inputs parse but
+// do not fit the rules above.
+func sameClientIP(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ipA := net.ParseIP(strings.TrimSpace(a))
+	ipB := net.ParseIP(strings.TrimSpace(b))
+	if ipA == nil || ipB == nil {
+		return false
+	}
+	// An IPv4-in-IPv6 address matches a bare IPv4 address when they denote the
+	// same host, so the token stays usable if the client's address form changes
+	// between requests (e.g. 127.0.0.1 vs ::ffff:127.0.0.1).
+	if ipA.To4() != nil || ipB.To4() != nil {
+		return ipA.Equal(ipB)
+	}
+	// Both are genuine IPv6 — compare the /64 network prefix.
+	mask := net.CIDRMask(64, 128)
+	return ipA.Mask(mask).Equal(ipB.Mask(mask))
+}
+
 // validateDownloadToken checks a token against the in-memory store. When
 // consume is true the token is deleted on success (downloads); when false the
 // token is left intact (previews, so the same token can still be used to
@@ -57,7 +94,7 @@ func validateDownloadToken(token, code, clientIP string, consume bool) bool {
 	if dt.code != code {
 		return false
 	}
-	if dt.clientIP != clientIP {
+	if !sameClientIP(dt.clientIP, clientIP) {
 		return false
 	}
 	if time.Since(dt.createdAt) > tokenTTL {
@@ -123,6 +160,10 @@ type FileResult struct {
 	CreatedAt    time.Time  `json:"created_at"`
 }
 
+// FileInfo is the full file view returned to the admin dashboard, including
+// the receive code and download progress. Public endpoints must NOT use this
+// type — it leaks the receive code (a selectively-shared extraction secret)
+// and download metadata to anyone who knows the share code.
 type FileInfo struct {
 	ID            uint       `json:"id"`
 	Code          string     `json:"code"`
@@ -134,6 +175,33 @@ type FileInfo struct {
 	HasPassword   bool       `json:"has_password"`
 	ExpireAt      *time.Time `json:"expire_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// PublicFileInfo is the redacted view returned by the public file-info and
+// receive-code endpoints. It omits the id, receive code, download count, and
+// max-downloads limit so an unauthenticated caller who only knows the share
+// code cannot derive the receive code (capability separation) or infer
+// remaining download budget.
+type PublicFileInfo struct {
+	Code        string     `json:"code"`
+	FileName    string     `json:"file_name"`
+	FileSize    int64      `json:"file_size"`
+	HasPassword bool       `json:"has_password"`
+	ExpireAt    *time.Time `json:"expire_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+// publicFileInfoFromModel builds the redacted public view. It deliberately
+// drops id, receive_code, download_count and max_downloads.
+func publicFileInfoFromModel(f *model.File) *PublicFileInfo {
+	return &PublicFileInfo{
+		Code:        f.Code,
+		FileName:    f.FileName,
+		FileSize:    f.FileSize,
+		HasPassword: f.PasswordHash != "",
+		ExpireAt:    f.ExpireAt,
+		CreatedAt:   f.CreatedAt,
+	}
 }
 
 // Create inserts a new file record with an auto-generated share code.
@@ -198,7 +266,7 @@ func (s *FileService) isExpired(f *model.File) bool {
 	return f.ExpireAt != nil && !time.Now().Before(*f.ExpireAt)
 }
 
-func (s *FileService) GetByCode(code string) (*FileInfo, error) {
+func (s *FileService) GetByCode(code string) (*PublicFileInfo, error) {
 	var f model.File
 	if err := s.db.Where("code = ?", code).First(&f).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -209,10 +277,10 @@ func (s *FileService) GetByCode(code string) (*FileInfo, error) {
 	if s.isExpired(&f) {
 		return nil, errors.New("文件不存在或已过期")
 	}
-	return fileInfoFromModel(&f), nil
+	return publicFileInfoFromModel(&f), nil
 }
 
-func (s *FileService) GetByReceiveCode(receiveCode string) (*FileInfo, error) {
+func (s *FileService) GetByReceiveCode(receiveCode string) (*PublicFileInfo, error) {
 	receiveCode = strings.ToUpper(strings.TrimSpace(receiveCode))
 	if receiveCode == "" || len(receiveCode) > 32 {
 		return nil, errors.New("收件码无效或文件已过期")
@@ -228,7 +296,7 @@ func (s *FileService) GetByReceiveCode(receiveCode string) (*FileInfo, error) {
 	if s.isExpired(&f) {
 		return nil, errors.New("收件码无效或文件已过期")
 	}
-	return fileInfoFromModel(&f), nil
+	return publicFileInfoFromModel(&f), nil
 }
 
 func fileInfoFromModel(f *model.File) *FileInfo {
@@ -255,7 +323,7 @@ func (s *FileService) VerifyPassword(code, password string) error {
 		return errors.New("文件不存在或已过期")
 	}
 	if f.MaxDownloads > 0 && f.DownloadCount >= f.MaxDownloads {
-		return errors.New("下载次数已达上限")
+		return ErrDownloadLimit
 	}
 	if f.PasswordHash == "" {
 		return nil
@@ -284,7 +352,7 @@ func (s *FileService) GetFilePath(code string) (string, string, error) {
 		return "", "", errors.New("下载失败")
 	}
 	if res.RowsAffected != 1 {
-		return "", "", errors.New("下载次数已达上限")
+		return "", "", ErrDownloadLimit
 	}
 	return f.FilePath, f.FileName, nil
 }
@@ -300,7 +368,7 @@ func (s *FileService) GetFilePathForPreview(code string) (string, string, error)
 		return "", "", errors.New("文件不存在或已过期")
 	}
 	if f.MaxDownloads > 0 && f.DownloadCount >= f.MaxDownloads {
-		return "", "", errors.New("下载次数已达上限")
+		return "", "", ErrDownloadLimit
 	}
 	return f.FilePath, f.FileName, nil
 }

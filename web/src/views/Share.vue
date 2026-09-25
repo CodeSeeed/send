@@ -28,10 +28,6 @@
           </span>
         </div>
         <div class="info-row">
-          <span class="info-label">下载次数</span>
-          <span>{{ downloadCountText }}</span>
-        </div>
-        <div class="info-row">
           <span class="info-label">过期时间</span>
           <span>{{ fileInfo.expire_at ? formatDateTime(fileInfo.expire_at) : '永不过期' }}</span>
         </div>
@@ -89,12 +85,13 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getFileInfo, verifyPassword, downloadFile, previewFile } from '../api/file'
 import { formatDateTime } from '../utils/time'
-import type { FileInfo } from '../types'
+import { isHttpError } from '../utils/request'
+import type { PublicFileInfo } from '../types'
 
 const route = useRoute()
 const loading = ref(true)
 const notFound = ref(false)
-const fileInfo = ref<FileInfo>()
+const fileInfo = ref<PublicFileInfo>()
 const password = ref('')
 const downloading = ref(false)
 const verified = ref(false)
@@ -105,23 +102,25 @@ const previewLoading = ref(false)
 const previewDataUrl = ref('')
 const previewType = ref<'pdf' | 'image' | 'text' | 'unsupported'>('unsupported')
 const previewText = ref('')
+// The server signals an exhausted download quota with HTTP 409, so the limit
+// state is driven by status codes rather than message-text matching. The
+// public file-info response no longer carries download_count/max_downloads.
+const limitReached = ref(false)
 // Reuse a download token only while it is comfortably inside the server-side
 // TTL (2 minutes, server/service/file.go tokenTTL). This mirrors the server
 // constant: if the server TTL changes, keep this below it so the client never
 // presents a token that already expired server-side.
 const DOWNLOAD_TOKEN_REUSE_MS = 110 * 1000
 
-const downloadLimitReached = computed(() => {
-  const f = fileInfo.value
-  return f && f.max_downloads > 0 && f.download_count >= f.max_downloads
-})
+const downloadLimitReached = computed(() => limitReached.value)
 
-const downloadCountText = computed(() => {
-  const f = fileInfo.value
-  if (!f) return ''
-  if (f.max_downloads > 0) return `${f.download_count} / ${f.max_downloads} 次`
-  return `${f.download_count} 次`
-})
+function handleActionError(e: any, fallback: string) {
+  if (isHttpError(e, 409)) {
+    limitReached.value = true
+  } else {
+    ElMessage.error(e.message || fallback)
+  }
+}
 
 const hasPreview = computed(() => previewType.value === 'text' || previewDataUrl.value !== '')
 
@@ -136,8 +135,10 @@ async function loadInfo() {
   try {
     const res = await getFileInfo(code)
     fileInfo.value = res.data
-    // Non-password files: obtain the token right away so preview/download are one click
-    if (res.data && !res.data.has_password && !downloadLimitReached.value) {
+    // Non-password files: obtain the token right away so preview/download are one click.
+    // If the file has hit its download limit, the server returns an error here and we
+    // surface the limit state instead of entering the verified flow.
+    if (res.data && !res.data.has_password) {
       await onVerify()
     }
   } catch {
@@ -157,7 +158,7 @@ async function onVerify() {
   try {
     await getDownloadToken(true)
   } catch (e: any) {
-    ElMessage.error(e.message || '密码验证失败')
+    handleActionError(e, '密码验证失败')
   } finally {
     verifying.value = false
   }
@@ -211,7 +212,7 @@ async function onPreview() {
       ElMessage.warning('该文件类型不支持在线预览')
     }
   } catch (e: any) {
-    ElMessage.error(e.message || '预览失败')
+    handleActionError(e, '预览失败')
   } finally {
     previewLoading.value = false
   }
@@ -230,10 +231,8 @@ async function onDownload() {
   try {
     const activeToken = await getDownloadToken()
     await downloadFile(fileInfo.value.code, activeToken)
-    // Update local count to reflect the just-completed download
-    if (fileInfo.value) fileInfo.value.download_count++
   } catch (e: any) {
-    ElMessage.error(e.message || '下载失败')
+    handleActionError(e, '下载失败')
   } finally {
     // Download tokens are one-time credentials. Clear after every attempt so
     // the next click obtains a fresh token, including after server-side errors.
