@@ -1,0 +1,10 @@
+.git
+**/.git
+**/node_modules
+web/dist
+server/data
+server/uploads
+server/server.exe
+*.log
+Dockerfile
+.dockerignore

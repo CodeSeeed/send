@@ -113,6 +113,98 @@ server {
 2. 用新二进制重启服务，数据库结构变更由启动时的自动迁移完成；
 3. 启动时会自动清理孤儿文件，无需手动干预。
 
+## Docker 部署（推荐）
+
+镜像在 GitHub Actions（CI）上构建，推到 GitHub Packages（GHCR），**服务器 2c2g 只需要 `docker pull` 和运行，不做任何编译**。
+
+### 服务器要求
+
+- Docker + Docker Compose Plugin（`docker compose version` 有输出即可）
+- 2c2g 足够：程序本体很小，前端 + 后端起容器占用约 150–250 MB 内存
+
+### 部署步骤
+
+1. **登录 GHCR**（只需权限最小的 PAT，见下）：
+
+   ```bash
+   docker login ghcr.io -u <GitHub用户名> --password-stdin <<< '<PAT>'
+   ```
+
+   PAT 在 GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)，勾选 `read:packages` 即可（只读拉镜像）。
+
+2. **创建部署目录并写配置**：
+
+   ```bash
+   mkdir -p send && cd send
+   curl -O https://raw.githubusercontent.com/<你的用户名>/send/main/docker-compose.yml
+   curl -O https://raw.githubusercontent.com/<你的用户名>/send/main/docker-compose.env.example
+   cp docker-compose.env.example .env
+   # 按需编辑 .env，然后：
+   ```
+
+3. **启动**：
+
+   ```bash
+   docker compose up -d
+   ```
+
+   首次会自动从 GHCR 拉取镜像 `ghcr.io/<你的用户名>/send:latest`。访问 `http://<服务器IP>:8081`。
+
+4. **常用命令**：
+
+   ```bash
+   docker compose logs -f                    # 看日志
+   docker compose pull && docker compose up -d   # 更新到最新镜像
+   ```
+
+### 数据在哪
+
+容器内 `data/`（SQLite 数据库）与 `uploads/`（上传文件）bind-mount 到宿主机 `./data` 与 `./uploads`，升级镜像、重建容器都不会丢。备份直接备份这两个目录即可。
+
+### 反向代理 + HTTPS
+
+生产建议用 Caddy 或 Nginx 把 8081 反代出去并终结 TLS（配置示例见上节）。若反向代理与容器同机，`SEND_TRUSTED_PROXIES=127.0.0.1,::1` 写进 `.env`。
+
+> 想直接用域名 + 自动 HTTPS？把下面这段加进 `docker-compose.yml` 的 `services:` 下即可（注意要把 `send` 服务旁的 `ports: - "8081:8081"` 删掉或改成只监听本机，避免端口给人直连）：
+
+```yaml
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SEND_TARGET: http://send:8081
+    volumes:
+      - ./caddy-data:/data
+      - ./caddy-config/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - send
+```
+
+Caddyfile（`./caddy-config/Caddyfile`）：
+
+```
+send.example.com {
+    reverse_proxy send:8081
+}
+```
+
+### 本地构建镜像（可选）
+
+想在本机构建镜像再 `docker save`/`docker load` 到服务器也行，但需要一台内存 ≥4G 的机器做编译：
+
+```bash
+cd 仓库根目录
+docker build -t ghcr.io/<你的用户名>/send:latest .
+docker save ghcr.io/<你的用户名>/send:latest | gzip > send.tar.gz
+# 拷到服务器后：
+docker load < send.tar.gz
+```
+
+本机没有 Docker 的话，直接用 GitHub Actions 的产物即可，不需要本地构建。
+
 ## 网络与安全配置
 
 `server/config/config.yaml` 中的重要配置：

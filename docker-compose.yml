@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  send:
+    image: ghcr.io/codeseed/send:latest
+    container_name: send
+    restart: unless-stopped
+    # 2c2g 足够:程序很小。生产环境建议放在反代(Caddy/Nginx)后由它做 TLS。
+    env_file:
+      - .env
+    ports:
+      - "${PUBLISH_PORT:-8081}:8081"
+    volumes:
+      # 两个持久化目录都 bind-mount 到宿主机,升级镜像不丢数据
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    environment:
+      GIN_MODE: release
+      SEND_DB_PATH: /app/data/send.db
+      SEND_UPLOAD_DIR: /app/uploads

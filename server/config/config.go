@@ -1,8 +1,11 @@
 package config
 
 import (
-	"gopkg.in/yaml.v3"
 	"os"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -68,10 +71,70 @@ func Load(path string) (*Config, error) {
 	cfg := Default()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return cfg, nil // return defaults if no config file
+		applyEnvOverrides(cfg) // env still wins when no YAML file exists
+		return cfg, nil
 	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	applyEnvOverrides(cfg)
 	return cfg, nil
+}
+
+// applyEnvOverrides lets container deployments override the YAML file via
+// environment variables. Priority is: env > YAML file > defaults — so a YAML
+// file ships defaults into the image and env (or nothing) adjusts them at run
+// time. Values are sanitized against the YAML schema; unrecognized variables
+// are ignored silently.
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("SEND_PORT"); v != "" {
+		cfg.Server.Port = v
+	}
+	if v := os.Getenv("SEND_STATIC_DIR"); v != "" {
+		cfg.Server.StaticDir = v
+	}
+	if v := os.Getenv("SEND_DB_PATH"); v != "" {
+		cfg.Database.Path = v
+	}
+	if v := os.Getenv("SEND_UPLOAD_DIR"); v != "" {
+		cfg.Upload.Dir = v
+	}
+	if v := os.Getenv("SEND_MAX_SIZE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			cfg.Upload.MaxSize = n
+		}
+	}
+	if v := os.Getenv("SEND_RATE_LIMIT_LOCALHOST"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.Server.RateLimitLocalhost = b
+		}
+	}
+	// List-valued settings: override only when the env value contains at least
+	// one real entry. An empty/whitespace-only value means "leave whatever the
+	// YAML said" — overriding with an empty slice would silently reset origins
+	// or proxies, changing CORS/proxy-trust behavior behind someone's back.
+	if v := os.Getenv("SEND_ALLOWED_ORIGINS"); v != "" {
+		if l := splitList(v); len(l) > 0 {
+			cfg.Server.AllowedOrigins = l
+		}
+	}
+	if v := os.Getenv("SEND_TRUSTED_PROXIES"); v != "" {
+		if l := splitList(v); len(l) > 0 {
+			cfg.Server.TrustedProxies = l
+		}
+	}
+}
+
+// splitList splits a comma-separated environment value into a slice,
+// trimming whitespace and dropping empty entries so ", " mistakes don't
+// introduce a bogus 403 (empty origin) or "" proxy entry.
+func splitList(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
