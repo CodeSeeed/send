@@ -21,6 +21,10 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates \
     && addgroup -S send && adduser -S send -G send
 COPY --from=server /out/send-server /usr/local/bin/send-server
+# 前端构建产物必须进镜像,否则 NoRoute 静态服务无页面可吐(404)
+COPY --from=web /web/dist /app/web/dist
+# 让后端默认静态目录指向镜像内的前端(容器无 config.yaml,走默认+env)
+ENV SEND_STATIC_DIR=/app/web/dist
 USER send
 WORKDIR /app
 EXPOSE 8081
